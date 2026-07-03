@@ -191,7 +191,7 @@ def extract_scenarios_yaml(client: docker.DockerClient, image: str) -> list[str]
         container.remove(force=True)
 
     if "scenarios" not in parsed or not isinstance(parsed["scenarios"], dict):
-        raise ValueError("scenarios.yaml must contain a top-level 'scenarios' mapping.")
+        raise ValueError(f"scenarios.yaml must contain a top-level 'scenarios' mapping. Got instead:\n {raw.decode()}")
 
     scenario_names = []
     for sname, sval in parsed["scenarios"].items():
@@ -377,6 +377,7 @@ def evaluate(
     try:
         scenarios = extract_scenarios_yaml(client, docker_image)
     except Exception as exc:
+        log.warning(f"Could not read scenarios.yaml from image: {exc}")
         row = _empty_row(team_name, docker_image, dataset_name, "__no_scenarios__", timestamp)
         row["error_message"] = f"Could not read scenarios.yaml from image: {exc}"
         insert_run(conn, row)
