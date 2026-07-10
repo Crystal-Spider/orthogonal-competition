@@ -282,6 +282,35 @@ class PeakMemoryMonitor:
             self._stop.wait(self._interval)
 
 
+class ContainerLogStreamer:
+    """
+    Streams a container's stdout/stderr to the console in real time from a
+    background thread.  Each line is prefixed so concurrent scenarios stay
+    distinguishable.
+    """
+
+    def __init__(self, container, prefix: str = ""):
+        self._container = container
+        self._prefix    = prefix
+        self._thread    = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        # follow=True ends once the container stops; just wait for the thread.
+        self._thread.join(timeout=5)
+
+    def _run(self):
+        try:
+            for chunk in self._container.logs(stream=True, follow=True):
+                text = chunk.decode("utf-8", errors="replace")
+                for line in text.splitlines():
+                    print(f"{self._prefix}{line}", flush=True)
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Single-scenario container run
 # ---------------------------------------------------------------------------
@@ -333,6 +362,9 @@ def run_scenario_container(
         )
         log.info("Container %s started  [scenario=%s]", container.short_id, scenario_name)
 
+        log_streamer = ContainerLogStreamer(container, prefix=f"[{scenario_name}] ")
+        log_streamer.start()
+
         monitor = PeakMemoryMonitor(container)
         monitor.start()
 
@@ -350,12 +382,10 @@ def run_scenario_container(
         peak_mb = monitor.stop()
         wall = time.monotonic() - t0
 
-        logs_tail = container.logs(
-            stdout=True, stderr=True
-        ).decode("utf-8", errors="replace")[-3000:]
-        print(logs_tail)
-
         if exit_code != 0:
+            logs_tail = container.logs(
+                stdout=True, stderr=True
+            ).decode("utf-8", errors="replace")[-3000:]
             log.error("Container exited %d\n%s", exit_code, logs_tail)
             return {
                 "status": "failed", "wall_time": wall, "peak_mem_mb": peak_mb,
@@ -366,6 +396,10 @@ def run_scenario_container(
         return {"status": "success", "wall_time": wall, "peak_mem_mb": peak_mb}
 
     finally:
+        try:
+            log_streamer.stop()
+        except Exception:
+            pass
         if container:
             try:
                 container.remove(force=True)
@@ -731,8 +765,6 @@ def main():
         datefmt="%H:%M:%S",
     )
     args = build_parser().parse_args()
-
-    # TODO: print leaderbords
 
     client = docker.from_env()
 

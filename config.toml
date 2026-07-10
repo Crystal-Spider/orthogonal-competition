@@ -29,9 +29,9 @@ k       = 100
 name  = "faiss-hnsw-baseline"
 image = "ann-orthogonal/faiss"
 
-# [[teams]]
-# name  = "annarchy"
-# image = "annarchy/nns:latest"
+[[teams]]
+name  = "annarchy"
+image = "annarchy/nns:latest"
 
 [[teams]]
 name  = "close-enough"
