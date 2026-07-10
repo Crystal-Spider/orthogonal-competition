@@ -25,6 +25,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from icecream import ic
@@ -364,6 +365,7 @@ def evaluate(
     dataset_path: str,
     k: int = 100,
     timeout: int = DEFAULT_TIMEOUT,
+    scenarios: list[str] | None = None,
 ) -> list[dict]:
     log = logging.getLogger(__name__)
     dataset_path = Path(dataset_path)
@@ -375,13 +377,37 @@ def evaluate(
 
     # -- Discover scenarios from the image --
     try:
-        scenarios = extract_scenarios_yaml(client, docker_image)
+        available = extract_scenarios_yaml(client, docker_image)
     except Exception as exc:
         log.warning(f"Could not read scenarios.yaml from image: {exc}")
         row = _empty_row(team_name, docker_image, dataset_name, "__no_scenarios__", timestamp)
         row["error_message"] = f"Could not read scenarios.yaml from image: {exc}"
         insert_run(conn, row)
         return [row]
+
+    results = []
+
+    # -- Restrict to the requested scenarios, if any --
+    if scenarios is None:
+        scenarios = available
+    else:
+        selected = []
+        for scenario in scenarios:
+            if scenario not in available:
+                log.warning(
+                    "Scenario %r not defined by image %s (available: %s)",
+                    scenario, docker_image, ", ".join(available),
+                )
+                row = _empty_row(team_name, docker_image, dataset_name, scenario, timestamp)
+                row["error_message"] = (
+                    f"Scenario {scenario!r} not defined by image. "
+                    f"Available scenarios: {', '.join(available)}"
+                )
+                insert_run(conn, row)
+                results.append(row)
+            else:
+                selected.append(scenario)
+        scenarios = selected
 
     # -- Load ground truth once --
     log.info("Loading ground-truth from %s ...", dataset_path)
@@ -393,9 +419,8 @@ def evaluate(
         row = _empty_row(team_name, docker_image, dataset_name, "__load_failed__", timestamp)
         row["error_message"] = f"Failed to load dataset: {exc}"
         insert_run(conn, row)
-        return [row]
-
-    results = []
+        results.append(row)
+        return results
 
     for scenario_name in scenarios:
         log.info("--- Scenario: %s ---", scenario_name)
@@ -529,6 +554,91 @@ def evaluate(
 
 
 # ---------------------------------------------------------------------------
+# Config-file driven evaluation
+# ---------------------------------------------------------------------------
+
+def load_config(path: str) -> dict:
+    """
+    Load and validate a TOML evaluation config.
+
+    Expected schema:
+      scenarios = ["batch", "streaming"]    # scenario names to run for every team
+      datasets = [                          # list of dataset .hdf5 paths
+        "data/sift-128-euclidean.hdf5",
+        "data/glove-100-angular.hdf5",
+      ]
+
+      # optional overrides (defaults shown)
+      db      = "results.db"
+      timeout = 1800
+      k       = 100
+
+      [[teams]]
+      name  = "alice"
+      image = "alice/nns:latest"
+
+      [[teams]]
+      name  = "bob"
+      image = "bob/nns:latest"
+    """
+    with open(path, "rb") as f:
+        cfg = tomllib.load(f)
+
+    datasets = cfg.get("datasets")
+    if not isinstance(datasets, list) or not datasets or not all(isinstance(d, str) for d in datasets):
+        raise ValueError("config: 'datasets' must be a non-empty list of dataset paths.")
+
+    scenarios = cfg.get("scenarios")
+    if not isinstance(scenarios, list) or not scenarios or not all(isinstance(s, str) for s in scenarios):
+        raise ValueError("config: 'scenarios' must be a non-empty list of scenario names.")
+
+    teams = cfg.get("teams")
+    if not isinstance(teams, list) or not teams:
+        raise ValueError("config: 'teams' must be a non-empty array of tables.")
+    for i, team in enumerate(teams):
+        if not isinstance(team, dict) or not isinstance(team.get("name"), str) \
+                or not isinstance(team.get("image"), str):
+            raise ValueError(
+                f"config: teams[{i}] must be a table with string 'name' and 'image' fields."
+            )
+
+    return {
+        "datasets": datasets,
+        "scenarios": scenarios,
+        "teams": teams,
+        "db":      cfg.get("db", DEFAULT_DB),
+        "timeout": int(cfg.get("timeout", DEFAULT_TIMEOUT)),
+        "k":       int(cfg.get("k", 100)),
+    }
+
+
+def run_config(client: docker.DockerClient, config_path: str) -> None:
+    """Run every (team, dataset) pair for the scenario named in the config."""
+    log = logging.getLogger(__name__)
+    cfg = load_config(config_path)
+    conn = open_db(cfg["db"])
+
+    log.info(
+        "Config: %d team(s) x %d dataset(s) x %d scenario(s)=[%s], db=%s",
+        len(cfg["teams"]), len(cfg["datasets"]), len(cfg["scenarios"]),
+        ", ".join(cfg["scenarios"]), cfg["db"],
+    )
+
+    for team in cfg["teams"]:
+        for dataset_path in cfg["datasets"]:
+            evaluate(
+                conn=conn,
+                client=client,
+                team_name=team["name"],
+                docker_image=team["image"],
+                dataset_path=dataset_path,
+                k=cfg["k"],
+                timeout=cfg["timeout"],
+                scenarios=cfg["scenarios"],
+            )
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -548,6 +658,9 @@ def build_parser():
     p.add_argument("--timeout", default=DEFAULT_TIMEOUT, type=int)
     p.add_argument("--k", type=int, default=100)
 
+    r = sub.add_parser("run", help="Evaluate submissions described in a TOML config file")
+    r.add_argument("--config", required=True, help="Path to the TOML config file")
+
     return parser
 
 
@@ -558,16 +671,18 @@ def main():
         datefmt="%H:%M:%S",
     )
     args = build_parser().parse_args()
-    conn = open_db(args.db)
 
     # TODO: print leaderbords
 
     client = docker.from_env()
 
     if args.command == "evaluate":
+        conn = open_db(args.db)
         evaluate(conn=conn, client=client, team_name=args.team,
                  docker_image=args.image, dataset_path=args.dataset,
                  k=args.k, timeout=args.timeout)
+    elif args.command == "run":
+        run_config(client=client, config_path=args.config)
 
 if __name__ == "__main__":
     main()

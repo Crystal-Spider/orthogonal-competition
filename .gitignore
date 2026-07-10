@@ -3,3 +3,4 @@
 *.db
 /datasets/*
 *.hdf5
+__pycache__

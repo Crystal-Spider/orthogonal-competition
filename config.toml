@@ -1,0 +1,37 @@
+# Example evaluation config for `python evaluator.py run --config example-config.toml`
+#
+# Runs every (team x dataset x scenario) combination and stores the
+# results in the SQLite database given by `db`.
+
+# Scenarios to run for every team. Each team's image must define these in its
+# scenarios.yaml; any it does not define is recorded as a failed run.
+scenarios = ["high_recall", "fast", "memory"]
+
+# Datasets to evaluate against (paths to the HDF5 files under datasets/).
+datasets = [
+    "datasets/fashion-mnist-784-euclidean.hdf5",
+    # "datasets/agnews-mxbai-public.hdf5",
+    # "datasets/simplewiki-openai-public.hdf5",
+]
+
+# Optional overrides (defaults shown).
+db      = "results.db"
+timeout = 1800
+k       = 100
+
+# Teams — one table per submission in the competitors/ directory.
+[[teams]]
+name  = "annarchy"
+image = "annarchy/nns:latest"
+
+[[teams]]
+name  = "close-enough"
+image = "closeenough"
+
+[[teams]]
+name  = "faiss-hnsw-baseline"
+image = "faiss-hnsw/nns:latest"
+
+[[teams]]
+name  = "finding-nnemo"
+image = "finding-nnemo/nns:latest"
