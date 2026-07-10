@@ -25,18 +25,22 @@ timeout = 1800
 k       = 100
 
 # Teams — one table per submission in the competitors/ directory.
-# [[teams]]
-# name  = "annarchy"
-# image = "annarchy/nns:latest"
-
-# [[teams]]
-# name  = "close-enough"
-# image = "close-enough:latest"
-
 [[teams]]
 name  = "faiss-hnsw-baseline"
 image = "ann-orthogonal/faiss"
 
 # [[teams]]
-# name  = "finding-nnemo"
-# image = "finding-nnemo/nns:latest"
+# name  = "annarchy"
+# image = "annarchy/nns:latest"
+
+[[teams]]
+name  = "close-enough"
+image = "close-enough:latest"
+
+[[teams]]
+name  = "kinda-neighbors"
+image = "visonfranc/kinda-neighbors:latest"
+
+[[teams]]
+name  = "finding-nnemo"
+image = "finding-nnemo/nns:latest"

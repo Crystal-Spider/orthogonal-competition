@@ -665,6 +665,36 @@ def run_config(client: docker.DockerClient, config_path: str) -> None:
             )
 
 
+def print_boards(db):
+    conn = open_db(db)
+    def doprint(scenario, orderby, descending):
+        print()
+        print(f"==== {scenario} (by {orderby}) ====")
+        res = conn.execute(f"""
+        select dataset, team_name, {orderby} from runs
+        where scenario = '{scenario}' 
+        order by dataset, {orderby} {"desc" if descending else ""}
+        """).fetchall()
+        last_dataset = None
+        for dataset, team_name, metric in res:
+            if dataset != last_dataset:
+                last_dataset = dataset
+            else:
+                dataset = " "*len(dataset)
+            unit = ""
+            if orderby == "qps":
+                unit = "qps"
+            elif orderby == "peak_mem_mb":
+                unit = "Mb"
+            print(f"{dataset} {team_name:30s} {metric:.3f} {unit}")
+
+    doprint("high_recall", "qps", True)
+    doprint("fast", "qps", True)
+    doprint("memory", "peak_mem_mb", False)
+
+    
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -685,8 +715,11 @@ def build_parser():
     p.add_argument("--timeout", default=DEFAULT_TIMEOUT, type=int)
     p.add_argument("--k", type=int, default=100)
 
-    r = sub.add_parser("run", help="Evaluate submissions described in a TOML config file")
+    r = sub.add_parser("run",  help="Evaluate submissions described in a TOML config file")
     r.add_argument("--config", required=True, help="Path to the TOML config file")
+
+    l = sub.add_parser("leaderboard", help="Prints the leaderboards for each scenario")
+    l.add_argument("--db",            default=DEFAULT_DB)
 
     return parser
 
@@ -710,6 +743,8 @@ def main():
                  k=args.k, timeout=args.timeout)
     elif args.command == "run":
         run_config(client=client, config_path=args.config)
+    elif args.command == "leaderboard":
+        print_boards(args.db)
 
 if __name__ == "__main__":
     main()
