@@ -112,6 +112,26 @@ def insert_run(conn: sqlite3.Connection, row: dict) -> int:
     return cur.lastrowid
 
 
+def run_exists(
+    conn: sqlite3.Connection,
+    team_name: str,
+    docker_image: str,
+    dataset: str,
+    scenario: str,
+) -> bool:
+    """Return True if a successful run for this configuration is already recorded."""
+    cur = conn.execute(
+        """
+        SELECT 1 FROM runs
+        WHERE team_name = ? AND docker_image = ? AND dataset = ?
+              AND scenario = ? AND status = 'success'
+        LIMIT 1
+        """,
+        (team_name, docker_image, dataset, scenario),
+    )
+    return cur.fetchone() is not None
+
+
 def insert_detail(conn: sqlite3.Connection, run_id: int, times: np.ndarray, all_recalls: np.ndarray) -> None:
     rows = [
         {"run_id": run_id, "query_index": i, "query_time_s": times[i], "query_recall": all_recalls[i]}
@@ -423,6 +443,13 @@ def evaluate(
         return results
 
     for scenario_name in scenarios:
+        if run_exists(conn, team_name, docker_image, dataset_name, scenario_name):
+            log.info(
+                "--- Scenario: %s --- already in database, skipping",
+                scenario_name,
+            )
+            continue
+
         log.info("--- Scenario: %s ---", scenario_name)
         row = _empty_row(team_name, docker_image, dataset_name, scenario_name, timestamp)
 
