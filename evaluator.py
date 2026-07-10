@@ -701,9 +701,9 @@ def run_config(client: docker.DockerClient, config_path: str) -> None:
 
 def print_boards(db):
     conn = open_db(db)
-    def doprint(scenario, orderby, descending):
+    def doprint(title, scenario, orderby, descending):
         print()
-        print(f"==== {scenario} (by {orderby}) ====")
+        print(f"==== {title} (by {orderby}) ====")
         res = conn.execute(f"""
         select dataset, team_name, {orderby} from runs
         where scenario = '{scenario}' 
@@ -722,9 +722,11 @@ def print_boards(db):
                 unit = "Mb"
             print(f"{dataset} {team_name:30s} {metric:.3f} {unit}")
 
-    doprint("high_recall", "qps", True)
-    doprint("fast", "qps", True)
-    doprint("memory", "peak_mem_mb", False)
+    doprint("Sherlock Holmes", "high_recall", "qps", True)
+    doprint("Bianconiglio", "fast", "qps", True)
+    doprint("Dory", "memory", "peak_mem_mb", False)
+    doprint("Marie Kondo", "high_recall", "build_time_s", False)
+    doprint("Paperone", "high_recall", "n_dist_queries", False)
 
     
 
