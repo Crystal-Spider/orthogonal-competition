@@ -9,14 +9,14 @@ scenarios = ["high_recall", "fast", "memory"]
 
 # Datasets to evaluate against (paths to the HDF5 files under datasets/).
 datasets = [
-    "datasets/fashion-mnist-784-euclidean.hdf5",
-    # "datasets/agnews-mxbai-private.hdf5",
-    # "datasets/celeba-resnet-private.hdf5",
-    # "datasets/gooaq-distilroberta-private.hdf5",
-    # "datasets/imagenet-clip-private.hdf5",
-    # "datasets/landmark-nomic-private.hdf5",
-    # "datasets/simplewiki-openai-private.hdf5",
-    # "datasets/yahoo-minilm-private.hdf5"
+    # "datasets/fashion-mnist-784-euclidean.hdf5",
+    "datasets/agnews-mxbai-private.hdf5",
+    "datasets/celeba-resnet-private.hdf5",
+    "datasets/gooaq-distilroberta-private.hdf5",
+    "datasets/imagenet-clip-private.hdf5",
+    "datasets/landmark-nomic-private.hdf5",
+    "datasets/simplewiki-openai-private.hdf5",
+    "datasets/yahoo-minilm-private.hdf5"
 ]
 
 # Optional overrides (defaults shown).
@@ -25,6 +25,10 @@ timeout = 1800
 k       = 100
 
 # Teams — one table per submission in the competitors/ directory.
+[[teams]]
+name  = "neighbors-grass"
+image = "neighbors-grass/ann:latest"
+
 [[teams]]
 name  = "faiss-hnsw-baseline"
 image = "ann-orthogonal/faiss"
@@ -38,9 +42,13 @@ name  = "close-enough"
 image = "close-enough:latest"
 
 [[teams]]
+name  = "annvedi"
+image = "annvedi/nns:latest"
+
+[[teams]]
 name  = "kinda-neighbors"
 image = "visonfranc/kinda-neighbors:latest"
 
-[[teams]]
-name  = "finding-nnemo"
-image = "finding-nnemo/nns:latest"
+# [[teams]]
+# name  = "finding-nnemo"
+# image = "finding-nnemo/nns:latest"

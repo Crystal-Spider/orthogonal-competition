@@ -700,27 +700,64 @@ def run_config(client: docker.DockerClient, config_path: str) -> None:
 
 
 def print_boards(db):
+    points = [10, 8, 6, 4, 3, 2, 1, 0, 0, 0, 0, 0]
+
     conn = open_db(db)
     def doprint(title, scenario, orderby, descending):
         print()
-        print(f"==== {title} (by {orderby}) ====")
+        print("="*80)
+        if descending:
+            better = "higher is better"
+        else:
+            better = "lower is better"
+        print(f"{title} (by {orderby}, {better})")
+        team_points = dict((team[0], 0) for team in conn.execute(f"""
+        select distinct team_name
+        from runs
+        where team_name != 'faiss-hnsw-baseline'
+        """).fetchall())
+
         res = conn.execute(f"""
-        select dataset, team_name, {orderby} from runs
+        select dataset, team_name, {orderby}, status from runs
         where scenario = '{scenario}' 
         order by dataset, {orderby} {"desc" if descending else ""}
         """).fetchall()
         last_dataset = None
-        for dataset, team_name, metric in res:
+        last_print = None
+        failures = dict(timeout=set(), failed=set())
+        for dataset, team_name, metric, status in res:
             if dataset != last_dataset:
+                print("-"*80)
+                points_idx = 0
                 last_dataset = dataset
-            else:
-                dataset = " "*len(dataset)
+                failures = dict(timeout=set(), failed=set())
             unit = ""
             if orderby == "qps":
                 unit = "qps"
             elif orderby == "peak_mem_mb":
                 unit = "Mb"
-            print(f"{dataset} {team_name:30s} {metric:.3f} {unit}")
+            if status != "success" or metric == 0.0:
+                if metric == 0.0:
+                    status = "failed"
+                failures[status].add(team_name)
+                continue
+            if last_print == dataset:
+                dataset = " "*len(dataset)
+            else:
+                last_print = dataset
+            if team_name in team_points:
+                team_points[team_name] += points[points_idx]
+            points_idx += 1
+            m = f"{metric:.3f}" if metric is not None else "-"
+            print(f"{dataset:30s} {team_name:30s} {m} {unit}")
+        print("-"*80)
+        print("timed out:", " ".join(failures["timeout"]))
+        print("failure:  ", " ".join(failures["failed"]))
+        print("-"*80)
+        print("Overall ranking")
+        print("\n".join([f"- {p[0]}: {p[1]}" for p in sorted(team_points.items(), key=lambda p: p[1], reverse=True)]))
+        print("-"*80)
+
 
     doprint("Sherlock Holmes", "high_recall", "qps", True)
     doprint("Bianconiglio", "fast", "qps", True)
