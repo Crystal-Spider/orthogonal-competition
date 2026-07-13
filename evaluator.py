@@ -703,7 +703,7 @@ def print_boards(db):
     points = [10, 8, 6, 4, 3, 2, 1, 0, 0, 0, 0, 0]
 
     conn = open_db(db)
-    def doprint(title, scenario, orderby, descending):
+    def doprint(title, scenario, orderby, descending, recall_threshold):
         print()
         print("="*80)
         if descending:
@@ -718,14 +718,14 @@ def print_boards(db):
         """).fetchall())
 
         res = conn.execute(f"""
-        select dataset, team_name, {orderby}, status from runs
+        select dataset, team_name, {orderby}, status, avg_recall from runs
         where scenario = '{scenario}' 
         order by dataset, {orderby} {"desc" if descending else ""}
         """).fetchall()
         last_dataset = None
         last_print = None
         failures = dict(timeout=set(), failed=set())
-        for dataset, team_name, metric, status in res:
+        for dataset, team_name, metric, status, recall in res:
             if dataset != last_dataset:
                 print("-"*80)
                 points_idx = 0
@@ -736,8 +736,8 @@ def print_boards(db):
                 unit = "qps"
             elif orderby == "peak_mem_mb":
                 unit = "Mb"
-            if status != "success" or metric == 0.0:
-                if metric == 0.0:
+            if status != "success" or metric == 0.0 or recall < recall_threshold:
+                if status == "success":
                     status = "failed"
                 failures[status].add(team_name)
                 continue
@@ -759,11 +759,11 @@ def print_boards(db):
         print("-"*80)
 
 
-    doprint("Sherlock Holmes", "high_recall", "qps", True)
-    doprint("Bianconiglio", "fast", "qps", True)
-    doprint("Dory", "memory", "peak_mem_mb", False)
-    doprint("Marie Kondo", "high_recall", "build_time_s", False)
-    doprint("Paperone", "high_recall", "n_dist_queries", False)
+    doprint("Sherlock Holmes", "high_recall", "qps", True, 0.95)
+    doprint("Bianconiglio", "fast", "qps", True, 0.8)
+    doprint("Dory", "memory", "peak_mem_mb", False, 0.95)
+    doprint("Marie Kondo", "high_recall", "build_time_s", False, 0.95)
+    doprint("Paperone", "high_recall", "n_dist_queries", False, 0.95)
 
     
 
