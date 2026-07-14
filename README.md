@@ -86,6 +86,53 @@ allowing inbound SSH from wherever you run the evaluator, and an Ubuntu **AMI**
 (Docker and socat are installed by user-data if absent). The `--backend` flag
 overrides whatever the config specifies.
 
+### Setting up an AWS profile
+
+The runner authenticates through `boto3`, which reads a named **profile** from
+`~/.aws/credentials` and `~/.aws/config`. To create one:
+
+1. In the AWS console, go to **IAM → Users → your user → Security credentials →
+   Create access key**, choose the *Command Line Interface (CLI)* use case, and
+   copy the **Access Key ID** and **Secret Access Key** (the secret is shown
+   once). The identity needs EC2 permissions — `AmazonEC2FullAccess` is the
+   simplest managed policy for testing.
+
+2. Add the keys to `~/.aws/credentials`:
+
+   ```ini
+   [orthogonal]
+   aws_access_key_id = AKIA...
+   aws_secret_access_key = ...
+   ```
+
+   and the default region to `~/.aws/config`:
+
+   ```ini
+   [profile orthogonal]
+   region = eu-west-1
+   ```
+
+   (Or run `aws configure --profile orthogonal` if you have the AWS CLI — it
+   writes the same two files. The CLI is not required; `boto3` reads the files
+   directly.)
+
+3. Select the profile before running the evaluator:
+
+   ```fish
+   set -x AWS_PROFILE orthogonal        # fish
+   # export AWS_PROFILE=orthogonal      # bash/zsh
+   ```
+
+4. Verify it authenticates:
+
+   ```
+   python -c "import boto3; print(boto3.Session().client('sts').get_caller_identity()['Arn'])"
+   ```
+
+   An `arn:aws:iam::...` line means the runner can reach AWS. If your
+   organization uses **AWS SSO / Identity Center** instead of IAM access keys,
+   configure the profile with `aws sso login` and set `AWS_PROFILE` the same way.
+
 
 Championships
 --------

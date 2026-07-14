@@ -371,8 +371,18 @@ class AwsRunner:
         # Expose the root-owned Docker socket on a localhost-only TCP port so we
         # can reach it via an SSH-forwarded plain TCP connection.
         self._ssh_exec("sudo apt-get install -y socat >/dev/null 2>&1 || true", check=False)
+        # Kill any stale bridge in its OWN command. The `[s]ocat` bracket trick
+        # keeps the pattern from matching this very command line (which contains
+        # the literal text "socat...PORT") and killing our own SSH shell — that
+        # self-match returns rc=-1 from paramiko and aborts the run.
         self._ssh_exec(
-            f"sudo pkill -f 'socat.*{REMOTE_DOCKER_TCP}' 2>/dev/null; "
+            f"sudo pkill -f '[s]ocat.*{REMOTE_DOCKER_TCP}' 2>/dev/null || true",
+            check=False,
+        )
+        # Launch the bridge in a separate command so no socat pattern is present
+        # to self-match. Output is redirected to a file, so the SSH channel
+        # closes cleanly (rc=0) once bash backgrounds the process and returns.
+        self._ssh_exec(
             f"sudo bash -c 'nohup socat "
             f"TCP-LISTEN:{REMOTE_DOCKER_TCP},bind=127.0.0.1,reuseaddr,fork "
             f"UNIX-CONNECT:/var/run/docker.sock >/tmp/socat.log 2>&1 &'"
