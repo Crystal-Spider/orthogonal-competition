@@ -49,6 +49,6 @@ image = "annvedi/nns:latest"
 name  = "kinda-neighbors"
 image = "visonfranc/kinda-neighbors:latest"
 
-# [[teams]]
-# name  = "finding-nnemo"
-# image = "finding-nnemo/nns:latest"
+[[teams]]
+name  = "finding-nnemo"
+image = "finding-nnemo/nns:latest"
