@@ -56,6 +56,37 @@ The evaluator:
   5. Stores one DB row per scenario.
 
 
+Running on AWS
+--------------
+
+By default the containers run on the local Docker daemon. To instead run them on
+an EC2 instance of a chosen type, add a `[runner]` block to the config (see the
+commented example in `config.toml`) and run with the config-driven command:
+
+```
+python evaluator.py run --config config.toml --backend aws
+```
+
+With the AWS backend the evaluator provisions **one** EC2 instance of the
+configured `instance_type`, runs every (team × dataset × scenario) container on
+it, and terminates it when finished. Specifically it:
+  1. launches the instance (boto3) with an existing key pair and security group;
+  2. downloads the config's datasets onto the host over HTTP from
+     `datasets_base_url` (default: the organizer's self-hosted directory);
+  3. ships each locally-built competitor image to the host with `docker save` /
+     `docker load` over SSH;
+  4. runs the containers on the remote daemon (reached via an SSH-forwarded
+     Docker socket) and copies each `results.hdf5` back — the measurement logic
+     is identical to the local backend, so numbers are comparable;
+  5. terminates the instance (set `terminate_after = false` to keep it).
+
+Prerequisites: valid AWS credentials in the environment (e.g. `AWS_PROFILE`), an
+existing EC2 **key pair** whose private key is at `key_path`, a **security group**
+allowing inbound SSH from wherever you run the evaluator, and an Ubuntu **AMI**
+(Docker and socat are installed by user-data if absent). The `--backend` flag
+overrides whatever the config specifies.
+
+
 Championships
 --------
 
