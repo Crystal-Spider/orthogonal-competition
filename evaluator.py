@@ -21,7 +21,6 @@ import io
 import json
 import logging
 import sqlite3
-import subprocess
 import tarfile
 import tempfile
 import threading
@@ -48,7 +47,8 @@ DEFAULT_DB      = "results.db"
 DEFAULT_TIMEOUT = 1800          # seconds per container run
 CONTAINER_DATA_MOUNT    = "/competition/data"
 CONTAINER_RESULTS_MOUNT = "/competition/results"
-MEM_POLL_INTERVAL = 0.5        # seconds between memory stat polls
+MEM_POLL_INTERVAL    = 0.5     # seconds between resource polls (local host)
+REMOTE_POLL_INTERVAL = 2.0     # ... and when each poll is an SSH round trip
 
 # ---------------------------------------------------------------------------
 # Database
@@ -258,115 +258,152 @@ def extract_scenarios_yaml(client: docker.DockerClient, image: str) -> list[str]
 # Memory polling
 # ---------------------------------------------------------------------------
 
-class PeakMemoryMonitor:
+class ContainerResourceMonitor:
     """
-    Polls container memory stats in a background thread.
-    Uses Docker's cgroup-based max_usage (true peak RSS, includes C heap).
+    Polls a container's peak RAM and GPU memory in a background thread, reading
+    both from the machine the container actually runs on via ``runner.host_exec``.
+    With the AWS backend that is the EC2 instance; with the local backend it is
+    this machine.  Measuring both the same way is what makes the numbers correct
+    for a remote daemon — an earlier version shelled out to ``nvidia-smi``
+    locally, which silently reported 0 MB whenever the GPU was on another host.
+
+    RAM comes from the container's own cgroup, preferring a kernel-maintained
+    running maximum (``memory.peak`` on cgroup v2 >= 5.19, or
+    ``memory.max_usage_in_bytes`` on v1) and falling back to sampling
+    ``memory.current``.  VRAM is the summed ``nvidia-smi --query-compute-apps``
+    usage of the processes listed in that same cgroup, matched by host PID so
+    unrelated GPU processes on the host are excluded.
+
+    One ``host_exec`` round trip per tick collects everything.  If the cgroup
+    cannot be located (unusual driver layout, rootless Docker), RAM falls back to
+    the Docker API's ``memory_stats`` and VRAM is left at 0.
+
+    Note that a container's cgroup disappears the moment it exits, so a spike in
+    the final polling interval can be missed — as with any sampling monitor.
     """
 
-    def __init__(self, container, interval: float = MEM_POLL_INTERVAL):
+    # Layouts for cgroup v2/v1 under both the systemd and cgroupfs Docker drivers.
+    _CGROUP_CANDIDATES = (
+        "/sys/fs/cgroup/system.slice/docker-{cid}.scope",
+        "/sys/fs/cgroup/docker/{cid}",
+        "/sys/fs/cgroup/memory/system.slice/docker-{cid}.scope",
+        "/sys/fs/cgroup/memory/docker/{cid}",
+    )
+    # First of these that exists wins; the first two are true peaks, the last is
+    # an instantaneous reading we take the max over ourselves.
+    _MEM_FILES = ("memory.peak", "memory.max_usage_in_bytes", "memory.current")
+    _RESOLVE_ATTEMPTS = 10          # cgroup appears a moment after the container
+
+    def __init__(self, container, runner, gpu: bool = False,
+                 interval: float | None = None):
         self._container = container
-        self._interval  = interval
-        self._peak_mb   = 0.0
-        self._stop      = threading.Event()
-        self._thread    = threading.Thread(target=self._run, daemon=True)
+        self._runner    = runner
+        self._gpu       = gpu
+        # Each remote tick is an SSH round trip, so poll the EC2 host more
+        # gently. RAM accuracy does not suffer when the kernel tracks the peak
+        # for us, and VRAM at this rate is plenty for a multi-minute run.
+        if interval is None:
+            interval = (MEM_POLL_INTERVAL if getattr(runner, "backend", "local") == "local"
+                        else REMOTE_POLL_INTERVAL)
+        self._interval     = interval
+        self._peak_mem_mb  = 0.0
+        self._peak_vram_mb = 0.0
+        self._cgroup   = None
+        self._attempts = 0
+        self._stop     = threading.Event()
+        self._thread   = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
         self._thread.start()
 
-    def stop(self) -> float:
+    def stop(self) -> tuple[float, float | None]:
+        """Returns (peak_mem_mb, peak_vram_mb); VRAM is None unless gpu=True."""
         self._stop.set()
         self._thread.join()
-        return self._peak_mb
+        return self._peak_mem_mb, (self._peak_vram_mb if self._gpu else None)
+
+    # -- host-side sampling -------------------------------------------------
+
+    def _resolve_cgroup(self) -> str | None:
+        cid = self._container.id
+        probes = " ".join(f"'{p.format(cid=cid)}'" for p in self._CGROUP_CANDIDATES)
+        rc, out = self._runner.host_exec(
+            f'for d in {probes}; do [ -d "$d" ] && echo "$d" && break; done'
+        )
+        if rc != 0:
+            return None
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        return lines[0] if lines else None
+
+    def _poll_command(self, cgroup: str) -> str:
+        mem_files = " ".join(f"{cgroup}/{f}" for f in self._MEM_FILES)
+        # `cat` skips the files that do not exist, so head -1 yields the most
+        # preferred reading available on this kernel.
+        parts = [f"cat {mem_files} 2>/dev/null | head -1", "echo ---"]
+        if self._gpu:
+            parts += [
+                f"cat {cgroup}/cgroup.procs 2>/dev/null",
+                "echo ---",
+                "nvidia-smi --query-compute-apps=pid,used_gpu_memory "
+                "--format=csv,noheader,nounits 2>/dev/null",
+            ]
+        return "; ".join(parts)
+
+    def _sample_host(self, cgroup: str) -> None:
+        # The compound command's exit status is the last command's, which fails
+        # on a host without nvidia-smi; parse whatever came back regardless.
+        _, out = self._runner.host_exec(self._poll_command(cgroup))
+        if not out.strip():
+            return
+        sections = out.split("---")
+
+        try:
+            self._peak_mem_mb = max(
+                self._peak_mem_mb, int(sections[0].split()[0]) / (1024 ** 2)
+            )
+        except (IndexError, ValueError):
+            pass
+
+        if self._gpu and len(sections) >= 3:
+            pids = {int(tok) for tok in sections[1].split() if tok.isdigit()}
+            total = 0.0
+            for line in sections[2].splitlines():
+                fields = [f.strip() for f in line.split(",")]
+                if len(fields) < 2:
+                    continue
+                try:
+                    if int(fields[0]) in pids:
+                        total += float(fields[1])
+                except ValueError:
+                    pass
+            self._peak_vram_mb = max(self._peak_vram_mb, total)
+
+    def _sample_docker_api(self) -> None:
+        """Fallback when the cgroup is not readable: RAM only, via the daemon."""
+        try:
+            stats = self._container.stats(stream=False)
+            usage = stats.get("memory_stats", {}).get("usage", 0)
+            self._peak_mem_mb = max(self._peak_mem_mb, usage / (1024 ** 2))
+        except Exception:
+            pass
 
     def _run(self):
+        log = logging.getLogger(__name__)
         while not self._stop.is_set():
-            try:
-                stats = self._container.stats(stream=False)
-                usage = stats.get("memory_stats", {}).get("usage", 0)
-                self._peak_mb = max(self._peak_mb, usage / (1024 ** 2))
-            except Exception:
-                pass
-            self._stop.wait(self._interval)
-
-
-class PeakVramMonitor:
-    """
-    Polls the GPU memory used by a container's processes in a background thread
-    via `nvidia-smi --query-compute-apps`. Only meaningful when the container
-    was launched with GPU access; reports the peak of the summed VRAM (MiB) of
-    the container's compute processes.
-
-    Matching is by host PID: nvidia-smi reports compute-app PIDs in the host
-    namespace and `docker top` reports the container's processes with those same
-    host PIDs, so we sum only the apps whose PID belongs to this container. That
-    keeps the measurement correct even if unrelated GPU processes are running.
-    """
-
-    def __init__(self, container, interval: float = MEM_POLL_INTERVAL):
-        self._container = container
-        self._interval  = interval
-        self._peak_mb   = 0.0
-        self._stop      = threading.Event()
-        self._thread    = threading.Thread(target=self._run, daemon=True)
-
-    def start(self):
-        self._thread.start()
-
-    def stop(self) -> float:
-        self._stop.set()
-        self._thread.join()
-        return self._peak_mb
-
-    def _container_pids(self) -> set[int]:
-        """Host-namespace PIDs of the processes running inside the container."""
-        try:
-            info = self._container.top()
-        except Exception:
-            return set()
-        titles = info.get("Titles") or []
-        procs  = info.get("Processes") or []
-        try:
-            pid_idx = titles.index("PID")
-        except ValueError:
-            return set()
-        pids: set[int] = set()
-        for proc in procs:
-            try:
-                pids.add(int(proc[pid_idx]))
-            except (ValueError, IndexError):
-                pass
-        return pids
-
-    @staticmethod
-    def _gpu_apps() -> list[tuple[int, float]]:
-        """(host_pid, used_gpu_memory_MiB) for every running compute app."""
-        try:
-            out = subprocess.run(
-                ["nvidia-smi",
-                 "--query-compute-apps=pid,used_gpu_memory",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout
-        except Exception:
-            return []
-        apps: list[tuple[int, float]] = []
-        for line in out.splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 2:
-                continue
-            try:
-                apps.append((int(parts[0]), float(parts[1])))
-            except ValueError:
-                pass
-        return apps
-
-    def _run(self):
-        while not self._stop.is_set():
-            pids = self._container_pids()
-            if pids:
-                total = sum(mem for pid, mem in self._gpu_apps() if pid in pids)
-                self._peak_mb = max(self._peak_mb, total)
+            if self._cgroup is None and self._attempts < self._RESOLVE_ATTEMPTS:
+                self._attempts += 1
+                self._cgroup = self._resolve_cgroup()
+                if self._cgroup is None and self._attempts == self._RESOLVE_ATTEMPTS:
+                    log.warning(
+                        "Could not locate the cgroup for container %s on the host; "
+                        "falling back to Docker API memory stats%s",
+                        self._container.short_id,
+                        " and reporting no VRAM" if self._gpu else "",
+                    )
+            if self._cgroup is not None:
+                self._sample_host(self._cgroup)
+            else:
+                self._sample_docker_api()
             self._stop.wait(self._interval)
 
 
@@ -426,7 +463,7 @@ def _extract_results_hdf5(container, results_dir: str) -> bool:
 
 
 def run_scenario_container(
-    client: docker.DockerClient,
+    runner,
     image: str,
     host_data_dir: str,
     results_dir: str,
@@ -448,9 +485,11 @@ def run_scenario_container(
     ``host_data_dir`` is the path *on the Docker host* holding the datasets; it
     is bind-mounted read-only.  Results are copied back out of the container via
     the Docker API (``get_archive``) rather than a bind mount, so a remote daemon
-    (AWS backend) works without sharing our filesystem.
+    (AWS backend) works without sharing our filesystem.  ``runner`` supplies both
+    that daemon and the shell used to measure resources on the container host.
     """
     log = logging.getLogger(__name__)
+    client = runner.client
 
     volumes = {
         host_data_dir: {
@@ -489,28 +528,22 @@ def run_scenario_container(
         log_streamer = ContainerLogStreamer(container, prefix=f"[{scenario_name}] ")
         log_streamer.start()
 
-        monitor = PeakMemoryMonitor(container)
+        monitor = ContainerResourceMonitor(container, runner, gpu=gpu)
         monitor.start()
-
-        vram_monitor = PeakVramMonitor(container) if gpu else None
-        if vram_monitor:
-            vram_monitor.start()
 
         try:
             result = container.wait(timeout=timeout)
             exit_code = result["StatusCode"]
         except Exception as exc:
             container.kill()
-            peak_mb = monitor.stop()
-            peak_vram = vram_monitor.stop() if vram_monitor else None
+            peak_mb, peak_vram = monitor.stop()
             wall = time.monotonic() - t0
             log.warning("Container timed out after %.0fs", wall)
             return {"status": "timeout", "wall_time": wall,
                     "peak_mem_mb": peak_mb, "peak_vram_mb": peak_vram,
                     "error": str(exc)}
 
-        peak_mb = monitor.stop()
-        peak_vram = vram_monitor.stop() if vram_monitor else None
+        peak_mb, peak_vram = monitor.stop()
         wall = time.monotonic() - t0
 
         if exit_code != 0:
@@ -638,7 +671,7 @@ def evaluate(
 
         with tempfile.TemporaryDirectory(prefix="nns_eval_") as tmpdir:
             run_result = run_scenario_container(
-                client=client,
+                runner=runner,
                 image=docker_image,
                 host_data_dir=runner.host_data_dir(dataset_path.parent),
                 results_dir=tmpdir,

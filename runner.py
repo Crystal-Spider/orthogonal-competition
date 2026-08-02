@@ -18,6 +18,10 @@ Both expose the same tiny interface used by ``evaluator.py``:
         runner.ensure_image(image)                 # make image available
         client   = runner.client                   # a docker.DockerClient
         data_dir = runner.host_data_dir(local_dir) # host path to bind-mount ro
+        rc, out  = runner.host_exec("nvidia-smi")  # shell out on the container host
+
+``host_exec`` is what lets the evaluator measure resources where the containers
+actually run: with the AWS backend that is the EC2 instance, not this machine.
 
 ``make_runner`` selects the backend from ``cfg["runner"]["backend"]`` and
 defaults to ``local`` so existing configs keep working unchanged.
@@ -29,6 +33,7 @@ import io
 import logging
 import select
 import socket
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -72,6 +77,17 @@ class LocalRunner:
     def ensure_image(self, image: str) -> None:
         # Images built locally are already visible to the local daemon.
         return None
+
+    def host_exec(self, command: str, timeout: float = 15.0) -> tuple[int, str]:
+        """Run a shell command on the container host — here, this machine."""
+        try:
+            proc = subprocess.run(
+                ["/bin/sh", "-c", command],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            return proc.returncode, proc.stdout
+        except Exception:
+            return 1, ""
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +216,9 @@ class AwsRunner:
         self._forward = None
         self._loaded = set()              # images already transferred to the host
         self.client = None                # remote docker.DockerClient (tcp://)
+        # host_exec is called from the resource-monitor thread while the main
+        # thread may also be driving the SSH session; serialise the two.
+        self._ssh_lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -332,10 +351,11 @@ class AwsRunner:
         raise RuntimeError(f"Could not load private key {key_path} (unsupported type or passphrase-protected)")
 
     def _ssh_exec(self, command: str, check: bool = True, log_output: bool = False) -> int:
-        stdin, stdout, stderr = self._ssh.exec_command(command)
-        out = stdout.read().decode("utf-8", "replace")
-        err = stderr.read().decode("utf-8", "replace")
-        rc = stdout.channel.recv_exit_status()
+        with self._ssh_lock:
+            stdin, stdout, stderr = self._ssh.exec_command(command)
+            out = stdout.read().decode("utf-8", "replace")
+            err = stderr.read().decode("utf-8", "replace")
+            rc = stdout.channel.recv_exit_status()
         if log_output and out.strip():
             log.info("[host] %s", out.strip())
         if rc != 0:
@@ -412,6 +432,26 @@ class AwsRunner:
     def host_data_dir(self, local_data_dir) -> str:
         # All datasets were downloaded flat into REMOTE_DATA_DIR by basename.
         return REMOTE_DATA_DIR
+
+    def host_exec(self, command: str, timeout: float = 15.0) -> tuple[int, str]:
+        """
+        Run a shell command on the container host — here, the EC2 instance.
+
+        Never raises: callers poll with it in a background thread, where a
+        transient SSH hiccup must not take the run down.  A failure is reported
+        as a non-zero return code with empty output.
+        """
+        ssh = self._ssh
+        if ssh is None:
+            return 1, ""
+        try:
+            with self._ssh_lock:
+                _, stdout, _ = ssh.exec_command(command, timeout=timeout)
+                out = stdout.read().decode("utf-8", "replace")
+                rc = stdout.channel.recv_exit_status()
+            return rc, out
+        except Exception:
+            return 1, ""
 
     def ensure_image(self, image: str) -> None:
         """Copy a locally-built image to the remote daemon (docker save|load)."""

@@ -20,9 +20,10 @@ datasets = [
 ]
 
 # Optional overrides (defaults shown).
-db      = "results.db"
+db      = "results-gpu.db"
 timeout = 1800
 k       = 100
+gpu     = true
 
 # Where to run the containers. Omit this block (or backend = "local") to use the
 # local Docker daemon, exactly as before. With backend = "aws" the evaluator
@@ -51,11 +52,10 @@ k       = 100
 [[teams]]
 name  = "friendly-neighborhood-solvers"
 image = "ortho-prelim-1:sherlock"
-gpu   = true
 
-[[teams]]
-name  = "faiss-hnsw-baseline"
-image = "ann-orthogonal/faiss"
+# [[teams]]
+# name  = "faiss-hnsw-baseline"
+# image = "ann-orthogonal/faiss"
 
 # [[teams]]
 # name  = "annarchy"
@@ -73,6 +73,6 @@ image = "ann-orthogonal/faiss"
 # name  = "kinda-neighbors"
 # image = "visonfranc/kinda-neighbors:latest"
 
-[[teams]]
-name  = "finding-nnemo"
-image = "finding-nnemo/nns:latest"
+# [[teams]]
+# name  = "finding-nnemo"
+# image = "finding-nnemo/nns:latest"
