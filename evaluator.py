@@ -21,6 +21,7 @@ import io
 import json
 import logging
 import sqlite3
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -65,7 +66,8 @@ CREATE TABLE IF NOT EXISTS runs (
     total_query_time_s  REAL,
     qps                 REAL,
     peak_mem_mb         REAL,    -- container-level peak RSS (cgroup)
-    index_mem_mb        REAL,    -- difference post index - pre index peak RSS 
+    peak_vram_mb        REAL,    -- container-level peak GPU memory (MiB); NULL if run without GPU
+    index_mem_mb        REAL,    -- difference post index - pre index peak RSS
     n_dist_queries      INTEGER,
     avg_recall          REAL,
     extra_metrics       TEXT     -- JSON blob
@@ -85,6 +87,10 @@ CREATE TABLE IF NOT EXISTS detail (
 def open_db(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.executescript(_CREATE_SCHEMA)
+    # Migrate databases created before peak_vram_mb existed.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    if "peak_vram_mb" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN peak_vram_mb REAL")
     conn.commit()
     return conn
 
@@ -95,13 +101,13 @@ def insert_run(conn: sqlite3.Connection, row: dict) -> int:
         INSERT INTO runs (
             team_name, docker_image, dataset, scenario, timestamp, status, error_message,
             build_time_s, total_query_time_s, qps,
-            peak_mem_mb, index_mem_mb, n_dist_queries,
+            peak_mem_mb, peak_vram_mb, index_mem_mb, n_dist_queries,
             avg_recall,
             extra_metrics
         ) VALUES (
             :team_name, :docker_image, :dataset, :scenario, :timestamp, :status, :error_message,
             :build_time_s, :total_query_time_s, :qps,
-            :peak_mem_mb, :index_mem_mb, :n_dist_queries,
+            :peak_mem_mb, :peak_vram_mb, :index_mem_mb, :n_dist_queries,
             :avg_recall,
             :extra_metrics
         )
@@ -156,7 +162,7 @@ def _empty_row(team, image, dataset, scenario, timestamp) -> dict:
         scenario=scenario, timestamp=timestamp,
         status="failed", error_message=None,
         build_time_s=None, total_query_time_s=None, qps=None,
-        peak_mem_mb=None, index_mem_mb=None, n_dist_queries=None,
+        peak_mem_mb=None, peak_vram_mb=None, index_mem_mb=None, n_dist_queries=None,
         avg_recall=None,
         extra_metrics=None,
     )
@@ -282,6 +288,86 @@ class PeakMemoryMonitor:
             self._stop.wait(self._interval)
 
 
+class PeakVramMonitor:
+    """
+    Polls the GPU memory used by a container's processes in a background thread
+    via `nvidia-smi --query-compute-apps`. Only meaningful when the container
+    was launched with GPU access; reports the peak of the summed VRAM (MiB) of
+    the container's compute processes.
+
+    Matching is by host PID: nvidia-smi reports compute-app PIDs in the host
+    namespace and `docker top` reports the container's processes with those same
+    host PIDs, so we sum only the apps whose PID belongs to this container. That
+    keeps the measurement correct even if unrelated GPU processes are running.
+    """
+
+    def __init__(self, container, interval: float = MEM_POLL_INTERVAL):
+        self._container = container
+        self._interval  = interval
+        self._peak_mb   = 0.0
+        self._stop      = threading.Event()
+        self._thread    = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self) -> float:
+        self._stop.set()
+        self._thread.join()
+        return self._peak_mb
+
+    def _container_pids(self) -> set[int]:
+        """Host-namespace PIDs of the processes running inside the container."""
+        try:
+            info = self._container.top()
+        except Exception:
+            return set()
+        titles = info.get("Titles") or []
+        procs  = info.get("Processes") or []
+        try:
+            pid_idx = titles.index("PID")
+        except ValueError:
+            return set()
+        pids: set[int] = set()
+        for proc in procs:
+            try:
+                pids.add(int(proc[pid_idx]))
+            except (ValueError, IndexError):
+                pass
+        return pids
+
+    @staticmethod
+    def _gpu_apps() -> list[tuple[int, float]]:
+        """(host_pid, used_gpu_memory_MiB) for every running compute app."""
+        try:
+            out = subprocess.run(
+                ["nvidia-smi",
+                 "--query-compute-apps=pid,used_gpu_memory",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+        except Exception:
+            return []
+        apps: list[tuple[int, float]] = []
+        for line in out.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                apps.append((int(parts[0]), float(parts[1])))
+            except ValueError:
+                pass
+        return apps
+
+    def _run(self):
+        while not self._stop.is_set():
+            pids = self._container_pids()
+            if pids:
+                total = sum(mem for pid, mem in self._gpu_apps() if pid in pids)
+                self._peak_mb = max(self._peak_mb, total)
+            self._stop.wait(self._interval)
+
+
 class ContainerLogStreamer:
     """
     Streams a container's stdout/stderr to the console in real time from a
@@ -325,10 +411,15 @@ def run_scenario_container(
     scenario_name: str,
     k: int,
     timeout: int,
+    gpu: bool = False,
 ) -> dict:
     """
     Run one container for one scenario.
     Returns: {status, peak_mem_mb, wall_time, error (optional)}
+
+    If `gpu` is True, all GPUs are exposed to the container via the nvidia
+    Docker runtime (requires nvidia-container-toolkit on the host). The team's
+    image must ship its own CUDA-capable libraries to make use of them.
     """
     log = logging.getLogger(__name__)
 
@@ -348,6 +439,12 @@ def run_scenario_container(
         "QUERY_K":       str(k),
     }
 
+    device_requests = None
+    if gpu:
+        device_requests = [
+            docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])
+        ]
+
     container = None
     t0 = time.monotonic()
     try:
@@ -356,6 +453,7 @@ def run_scenario_container(
             detach=True,
             volumes=volumes,
             environment=environment,
+            device_requests=device_requests,
             # mem_limit=MEMORY_LIMIT,
             network_disabled=True,
             remove=False,
@@ -368,18 +466,25 @@ def run_scenario_container(
         monitor = PeakMemoryMonitor(container)
         monitor.start()
 
+        vram_monitor = PeakVramMonitor(container) if gpu else None
+        if vram_monitor:
+            vram_monitor.start()
+
         try:
             result = container.wait(timeout=timeout)
             exit_code = result["StatusCode"]
         except Exception as exc:
             container.kill()
             peak_mb = monitor.stop()
+            peak_vram = vram_monitor.stop() if vram_monitor else None
             wall = time.monotonic() - t0
             log.warning("Container timed out after %.0fs", wall)
             return {"status": "timeout", "wall_time": wall,
-                    "peak_mem_mb": peak_mb, "error": str(exc)}
+                    "peak_mem_mb": peak_mb, "peak_vram_mb": peak_vram,
+                    "error": str(exc)}
 
         peak_mb = monitor.stop()
+        peak_vram = vram_monitor.stop() if vram_monitor else None
         wall = time.monotonic() - t0
 
         if exit_code != 0:
@@ -389,11 +494,14 @@ def run_scenario_container(
             log.error("Container exited %d\n%s", exit_code, logs_tail)
             return {
                 "status": "failed", "wall_time": wall, "peak_mem_mb": peak_mb,
+                "peak_vram_mb": peak_vram,
                 "error": f"Exit code {exit_code}\n---\n{logs_tail}",
             }
 
-        log.info("Container done in %.1fs  peak_mem=%.0fMB", wall, peak_mb)
-        return {"status": "success", "wall_time": wall, "peak_mem_mb": peak_mb}
+        vram_note = f"  peak_vram={peak_vram:.0f}MB" if peak_vram is not None else ""
+        log.info("Container done in %.1fs  peak_mem=%.0fMB%s", wall, peak_mb, vram_note)
+        return {"status": "success", "wall_time": wall, "peak_mem_mb": peak_mb,
+                "peak_vram_mb": peak_vram}
 
     finally:
         try:
@@ -420,6 +528,7 @@ def evaluate(
     k: int = 100,
     timeout: int = DEFAULT_TIMEOUT,
     scenarios: list[str] | None = None,
+    gpu: bool = False,
 ) -> list[dict]:
     log = logging.getLogger(__name__)
     dataset_path = Path(dataset_path)
@@ -498,9 +607,11 @@ def evaluate(
                 scenario_name=scenario_name,
                 k=k,
                 timeout=timeout,
+                gpu=gpu,
             )
 
-            row["peak_mem_mb"] = run_result.get("peak_mem_mb")
+            row["peak_mem_mb"]  = run_result.get("peak_mem_mb")
+            row["peak_vram_mb"] = run_result.get("peak_vram_mb")
 
             if run_result["status"] != "success":
                 row["status"]        = run_result["status"]
@@ -633,6 +744,7 @@ def load_config(path: str) -> dict:
       db      = "results.db"
       timeout = 1800
       k       = 100
+      gpu     = false                       # expose host GPUs to containers
 
       [[teams]]
       name  = "alice"
@@ -670,6 +782,7 @@ def load_config(path: str) -> dict:
         "db":      cfg.get("db", DEFAULT_DB),
         "timeout": int(cfg.get("timeout", DEFAULT_TIMEOUT)),
         "k":       int(cfg.get("k", 100)),
+        "gpu":     bool(cfg.get("gpu", False)),
     }
 
 
@@ -696,6 +809,7 @@ def run_config(client: docker.DockerClient, config_path: str) -> None:
                 k=cfg["k"],
                 timeout=cfg["timeout"],
                 scenarios=cfg["scenarios"],
+                gpu=cfg["gpu"],
             )
 
 
@@ -787,6 +901,8 @@ def build_parser():
     p.add_argument("--db",      default=DEFAULT_DB)
     p.add_argument("--timeout", default=DEFAULT_TIMEOUT, type=int)
     p.add_argument("--k", type=int, default=100)
+    p.add_argument("--gpu", action="store_true",
+                   help="Expose all host GPUs to the container (nvidia runtime)")
 
     r = sub.add_parser("run",  help="Evaluate submissions described in a TOML config file")
     r.add_argument("--config", required=True, help="Path to the TOML config file")
@@ -811,7 +927,7 @@ def main():
         conn = open_db(args.db)
         evaluate(conn=conn, client=client, team_name=args.team,
                  docker_image=args.image, dataset_path=args.dataset,
-                 k=args.k, timeout=args.timeout)
+                 k=args.k, timeout=args.timeout, gpu=args.gpu)
     elif args.command == "run":
         run_config(client=client, config_path=args.config)
     elif args.command == "leaderboard":
