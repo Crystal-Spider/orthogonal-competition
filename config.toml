@@ -30,6 +30,11 @@ name  = "neighbors-grass"
 image = "neighbors-grass/ann:latest"
 
 [[teams]]
+name  = "friendly-neighborhood-solvers"
+image = "ortho-prelim-1:sherlock"
+gpu   = true
+
+[[teams]]
 name  = "faiss-hnsw-baseline"
 image = "ann-orthogonal/faiss"
 
