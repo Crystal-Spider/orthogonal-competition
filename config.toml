@@ -24,10 +24,29 @@ db      = "results.db"
 timeout = 1800
 k       = 100
 
+# Where to run the containers. Omit this block (or backend = "local") to use the
+# local Docker daemon, exactly as before. With backend = "aws" the evaluator
+# provisions ONE EC2 instance of the chosen type, runs every container on it,
+# and terminates it when done. Datasets are downloaded onto the host over HTTP
+# from `datasets_base_url`; locally-built images are shipped with docker save/load.
+# Override per-invocation with `--backend aws` / `--backend local`.
+#
+# [runner]
+# backend       = "aws"            # "local" (default) | "aws"
+# instance_type = "c7i.4xlarge"    # any EC2 instance type
+# region        = "eu-west-1"
+# ami           = "ami-xxxxxxxx"   # Ubuntu AMI; user-data installs docker+socat if missing
+# key_name      = "orthogonal"     # existing EC2 key pair name
+# key_path      = "~/.ssh/orthogonal.pem"   # local private key for SSH
+# security_group_ids = ["sg-xxxx"] # must allow inbound SSH from where the evaluator runs
+# volume_size_gb = 100             # root EBS size (datasets can be large)
+# terminate_after = true           # set false to keep the instance for debugging
+# # datasets_base_url = "https://www.dei.unipd.it/~ceccarello/orthogonal-datasets"
+
 # Teams — one table per submission in the competitors/ directory.
-[[teams]]
-name  = "neighbors-grass"
-image = "neighbors-grass/ann:latest"
+# [[teams]]
+# name  = "neighbors-grass"
+# image = "neighbors-grass/ann:latest"
 
 [[teams]]
 name  = "friendly-neighborhood-solvers"
@@ -38,21 +57,21 @@ gpu   = true
 name  = "faiss-hnsw-baseline"
 image = "ann-orthogonal/faiss"
 
-[[teams]]
-name  = "annarchy"
-image = "annarchy/nns:latest"
+# [[teams]]
+# name  = "annarchy"
+# image = "annarchy/nns:latest"
 
-[[teams]]
-name  = "close-enough"
-image = "close-enough:latest"
+# [[teams]]
+# name  = "close-enough"
+# image = "close-enough:latest"
 
-[[teams]]
-name  = "annvedi"
-image = "annvedi/nns:latest"
+# [[teams]]
+# name  = "annvedi"
+# image = "annvedi/nns:latest"
 
-[[teams]]
-name  = "kinda-neighbors"
-image = "visonfranc/kinda-neighbors:latest"
+# [[teams]]
+# name  = "kinda-neighbors"
+# image = "visonfranc/kinda-neighbors:latest"
 
 [[teams]]
 name  = "finding-nnemo"

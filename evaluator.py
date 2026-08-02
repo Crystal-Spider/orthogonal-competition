@@ -38,6 +38,8 @@ import h5py
 import numpy as np
 import yaml
 
+from runner import LocalRunner, make_runner
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -401,10 +403,32 @@ class ContainerLogStreamer:
 # Single-scenario container run
 # ---------------------------------------------------------------------------
 
+def _extract_results_hdf5(container, results_dir: str) -> bool:
+    """
+    Copy CONTAINER_RESULTS_MOUNT/results.hdf5 out of the (stopped) container into
+    the local results_dir via the Docker API.  Works identically whether the
+    daemon is local or remote, so both backends share this path.
+
+    Returns True if results.hdf5 was found and written.
+    """
+    remote_path = f"{CONTAINER_RESULTS_MOUNT}/results.hdf5"
+    try:
+        stream, _ = container.get_archive(remote_path)
+    except docker.errors.NotFound:
+        return False
+    buf = io.BytesIO(b"".join(stream))
+    with tarfile.open(fileobj=buf) as tar:
+        member = tar.getmember("results.hdf5")
+        src = tar.extractfile(member)
+        with open(Path(results_dir) / "results.hdf5", "wb") as out:
+            out.write(src.read())
+    return True
+
+
 def run_scenario_container(
     client: docker.DockerClient,
     image: str,
-    data_dir: str,
+    host_data_dir: str,
     results_dir: str,
     dataset_filename: str,
     dataset_name: str,
@@ -420,15 +444,17 @@ def run_scenario_container(
     If `gpu` is True, all GPUs are exposed to the container via the nvidia
     Docker runtime (requires nvidia-container-toolkit on the host). The team's
     image must ship its own CUDA-capable libraries to make use of them.
+
+    ``host_data_dir`` is the path *on the Docker host* holding the datasets; it
+    is bind-mounted read-only.  Results are copied back out of the container via
+    the Docker API (``get_archive``) rather than a bind mount, so a remote daemon
+    (AWS backend) works without sharing our filesystem.
     """
     log = logging.getLogger(__name__)
 
     volumes = {
-        str(Path(data_dir).resolve()): {
+        host_data_dir: {
             "bind": CONTAINER_DATA_MOUNT, "mode": "ro",
-        },
-        str(Path(results_dir).resolve()): {
-            "bind": CONTAINER_RESULTS_MOUNT, "mode": "rw",
         },
     }
     environment = {
@@ -498,10 +524,13 @@ def run_scenario_container(
                 "error": f"Exit code {exit_code}\n---\n{logs_tail}",
             }
 
+        # Copy results.hdf5 out of the container before it is removed.
+        got_results = _extract_results_hdf5(container, results_dir)
+
         vram_note = f"  peak_vram={peak_vram:.0f}MB" if peak_vram is not None else ""
         log.info("Container done in %.1fs  peak_mem=%.0fMB%s", wall, peak_mb, vram_note)
         return {"status": "success", "wall_time": wall, "peak_mem_mb": peak_mb,
-                "peak_vram_mb": peak_vram}
+                "peak_vram_mb": peak_vram, "got_results": got_results}
 
     finally:
         try:
@@ -521,7 +550,7 @@ def run_scenario_container(
 
 def evaluate(
     conn: sqlite3.Connection,
-    client: docker.DockerClient,
+    runner,
     team_name: str,
     docker_image: str,
     dataset_path: str,
@@ -531,12 +560,23 @@ def evaluate(
     gpu: bool = False,
 ) -> list[dict]:
     log = logging.getLogger(__name__)
+    client = runner.client
     dataset_path = Path(dataset_path)
     dataset_name = dataset_path.stem
     timestamp    = datetime.now(timezone.utc).isoformat()
 
     log.info("=" * 60)
     log.info("Team: %s | Image: %s | Dataset: %s", team_name, docker_image, dataset_name)
+
+    # -- Make the image available to the (possibly remote) daemon --
+    try:
+        runner.ensure_image(docker_image)
+    except Exception as exc:
+        log.warning(f"Could not make image available on the runner: {exc}")
+        row = _empty_row(team_name, docker_image, dataset_name, "__no_image__", timestamp)
+        row["error_message"] = f"Could not make image available on the runner: {exc}"
+        insert_run(conn, row)
+        return [row]
 
     # -- Discover scenarios from the image --
     try:
@@ -600,7 +640,7 @@ def evaluate(
             run_result = run_scenario_container(
                 client=client,
                 image=docker_image,
-                data_dir=str(dataset_path.parent),
+                host_data_dir=runner.host_data_dir(dataset_path.parent),
                 results_dir=tmpdir,
                 dataset_filename=dataset_path.name,
                 dataset_name=dataset_name,
@@ -775,6 +815,9 @@ def load_config(path: str) -> dict:
                 f"config: teams[{i}] must be a table with string 'name' and 'image' fields."
             )
 
+    runner_cfg = cfg.get("runner") or {"backend": "local"}
+    _validate_runner_cfg(runner_cfg)
+
     return {
         "datasets": datasets,
         "scenarios": scenarios,
@@ -783,34 +826,59 @@ def load_config(path: str) -> dict:
         "timeout": int(cfg.get("timeout", DEFAULT_TIMEOUT)),
         "k":       int(cfg.get("k", 100)),
         "gpu":     bool(cfg.get("gpu", False)),
+        "runner":  runner_cfg,
     }
 
 
-def run_config(client: docker.DockerClient, config_path: str) -> None:
+def _validate_runner_cfg(runner_cfg: dict) -> None:
+    """Validate the optional [runner] block; AWS fields are required only for aws."""
+    if not isinstance(runner_cfg, dict):
+        raise ValueError("config: '[runner]' must be a table.")
+    backend = runner_cfg.get("backend", "local")
+    if backend not in ("local", "aws"):
+        raise ValueError(f"config: runner.backend must be 'local' or 'aws', got {backend!r}.")
+    if backend == "aws":
+        required = ("instance_type", "region", "ami", "key_name", "key_path")
+        missing = [k for k in required if not isinstance(runner_cfg.get(k), str) or not runner_cfg[k]]
+        if missing:
+            raise ValueError(
+                "config: runner.backend='aws' requires string fields: "
+                + ", ".join(missing)
+            )
+        sg = runner_cfg.get("security_group_ids")
+        if sg is not None and (not isinstance(sg, list) or not all(isinstance(s, str) for s in sg)):
+            raise ValueError("config: runner.security_group_ids must be a list of strings.")
+
+
+def run_config(config_path: str, backend: str | None = None) -> None:
     """Run every (team, dataset) pair for the scenario named in the config."""
     log = logging.getLogger(__name__)
     cfg = load_config(config_path)
+    if backend is not None:
+        cfg["runner"]["backend"] = backend
+        _validate_runner_cfg(cfg["runner"])
     conn = open_db(cfg["db"])
 
     log.info(
-        "Config: %d team(s) x %d dataset(s) x %d scenario(s)=[%s], db=%s",
+        "Config: %d team(s) x %d dataset(s) x %d scenario(s)=[%s], db=%s, backend=%s",
         len(cfg["teams"]), len(cfg["datasets"]), len(cfg["scenarios"]),
-        ", ".join(cfg["scenarios"]), cfg["db"],
+        ", ".join(cfg["scenarios"]), cfg["db"], cfg["runner"].get("backend", "local"),
     )
 
-    for team in cfg["teams"]:
-        for dataset_path in cfg["datasets"]:
-            evaluate(
-                conn=conn,
-                client=client,
-                team_name=team["name"],
-                docker_image=team["image"],
-                dataset_path=dataset_path,
-                k=cfg["k"],
-                timeout=cfg["timeout"],
-                scenarios=cfg["scenarios"],
-                gpu=cfg["gpu"],
-            )
+    with make_runner(cfg) as runner:
+        for team in cfg["teams"]:
+            for dataset_path in cfg["datasets"]:
+                evaluate(
+                    conn=conn,
+                    runner=runner,
+                    team_name=team["name"],
+                    docker_image=team["image"],
+                    dataset_path=dataset_path,
+                    k=cfg["k"],
+                    timeout=cfg["timeout"],
+                    scenarios=cfg["scenarios"],
+                    gpu=cfg["gpu"],
+                )
 
 
 def print_boards(db):
@@ -906,6 +974,8 @@ def build_parser():
 
     r = sub.add_parser("run",  help="Evaluate submissions described in a TOML config file")
     r.add_argument("--config", required=True, help="Path to the TOML config file")
+    r.add_argument("--backend", choices=("local", "aws"), default=None,
+                   help="Override the config's runner backend (default: as configured, else local)")
 
     l = sub.add_parser("leaderboard", help="Prints the leaderboards for each scenario")
     l.add_argument("--db",            default=DEFAULT_DB)
@@ -921,15 +991,15 @@ def main():
     )
     args = build_parser().parse_args()
 
-    client = docker.from_env()
-
     if args.command == "evaluate":
         conn = open_db(args.db)
-        evaluate(conn=conn, client=client, team_name=args.team,
-                 docker_image=args.image, dataset_path=args.dataset,
-                 k=args.k, timeout=args.timeout, gpu=args.gpu)
+        # Single-submission evaluation always runs on the local daemon.
+        with LocalRunner() as runner:
+            evaluate(conn=conn, runner=runner, team_name=args.team,
+                     docker_image=args.image, dataset_path=args.dataset,
+                     k=args.k, timeout=args.timeout, gpu=args.gpu)
     elif args.command == "run":
-        run_config(client=client, config_path=args.config)
+        run_config(config_path=args.config, backend=args.backend)
     elif args.command == "leaderboard":
         print_boards(args.db)
 
