@@ -1,4 +1,4 @@
-# NNS Competition – Scenario Definitions
+# NNS Competition – Scenario Definitions (faiss-hnsw baseline)
 # =========================================
 # Structure:
 #
@@ -11,28 +11,79 @@
 #         index_params: {...}
 #         query_params: {...}
 #
-# The harness resolves params as:
-#   1. Use the block matching the current dataset name, if present.
-#   2. Otherwise fall back to 'default'.
-#   3. If neither exists, the scenario fails with a clear error.
+# Dataset names match the HDF5 filename stem (e.g. "agnews-mxbai-private" for
+# agnews-mxbai-private.hdf5). The evaluated datasets are the *-private files.
 #
-# Dataset names match the HDF5 filename stem
-# (e.g. "sift-128-euclidean" for sift-128-euclidean.hdf5).
+# The ef values below were tuned by sweeping efSearch on the public query sets
+# (see hnsw_sweep.py) and picking, per dataset, the smallest ef that clears the
+# recall target with a safety margin. Recall is distance-based @k=100, exactly
+# as evaluator.py computes it.
 #
-# Scenario names must be valid Python identifiers.
+#   high_recall / memory : target avg recall >= 0.95
+#   fast                 : target avg recall >= 0.80
+#
+# high_recall uses a denser graph (M=32, efC=200): it reaches 0.95 at a lower ef,
+# giving faster queries and fewer distance computations. memory uses the leaner
+# baseline graph (M=16, efC=100) to minimise index memory while still >= 0.95.
 
 scenarios:
 
+  # ---- >= 0.95 recall, optimised for speed / fewest distances ----
   high_recall:
     default:
-      index_params: {efConstruction: 100, M: 16}
-      query_params: {ef: 50}
+      index_params: {efConstruction: 200, M: 32}
+      query_params: {ef: 160}
+    agnews-mxbai-private:
+      index_params: {efConstruction: 200, M: 32}
+      query_params: {ef: 120}
+    celeba-resnet-private:
+      index_params: {efConstruction: 200, M: 32}
+      query_params: {ef: 160}
+    gooaq-distilroberta-private:
+      index_params: {efConstruction: 200, M: 32}
+      query_params: {ef: 120}
+    imagenet-clip-private:
+      index_params: {efConstruction: 200, M: 32}
+      query_params: {ef: 120}
+    landmark-nomic-private:
+      index_params: {efConstruction: 200, M: 32}
+      query_params: {ef: 100}
+    simplewiki-openai-private:
+      index_params: {efConstruction: 200, M: 32}
+      query_params: {ef: 120}
+    yahoo-minilm-private:
+      index_params: {efConstruction: 200, M: 32}
+      query_params: {ef: 160}
+
+  # ---- >= 0.80 recall, minimal work ----
   fast:
     default:
       index_params: {efConstruction: 100, M: 16}
       query_params: {ef: 50}
+
+  # ---- >= 0.95 recall, optimised for low memory (leaner M=16 graph) ----
   memory:
     default:
       index_params: {efConstruction: 100, M: 16}
-      query_params: {ef: 50}
-
+      query_params: {ef: 260}
+    agnews-mxbai-private:
+      index_params: {efConstruction: 100, M: 16}
+      query_params: {ef: 160}
+    celeba-resnet-private:
+      index_params: {efConstruction: 100, M: 16}
+      query_params: {ef: 260}
+    gooaq-distilroberta-private:
+      index_params: {efConstruction: 100, M: 16}
+      query_params: {ef: 160}
+    imagenet-clip-private:
+      index_params: {efConstruction: 100, M: 16}
+      query_params: {ef: 160}
+    landmark-nomic-private:
+      index_params: {efConstruction: 100, M: 16}
+      query_params: {ef: 120}
+    simplewiki-openai-private:
+      index_params: {efConstruction: 100, M: 16}
+      query_params: {ef: 160}
+    yahoo-minilm-private:
+      index_params: {efConstruction: 100, M: 16}
+      query_params: {ef: 200}
