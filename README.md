@@ -86,6 +86,10 @@ allowing inbound SSH from wherever you run the evaluator, and an Ubuntu **AMI**
 (Docker and socat are installed by user-data if absent). The `--backend` flag
 overrides whatever the config specifies.
 
+See [`AWS.md`](AWS.md) for which instance type and AMI to pick — in particular
+for GPU runs, where the default user-data does *not* install NVIDIA drivers —
+and for how peak RAM and VRAM are measured on the instance.
+
 ### Setting up an AWS profile
 
 The runner authenticates through `boto3`, which reads a named **profile** from
