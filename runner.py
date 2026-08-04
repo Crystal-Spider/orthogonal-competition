@@ -9,7 +9,7 @@ handed.  This module hides that behind a small ``Runner`` abstraction:
 
 - ``LocalRunner``  – the historical behaviour: run on the local daemon.
 - ``AwsRunner``    – provision one EC2 instance (of a chosen instance type),
-                     run every container on it over an SSH-forwarded Docker
+                     run every container on it over an SSH-tunnelled Docker
                      socket, then terminate it.
 
 Both expose the same tiny interface used by ``evaluator.py``:
@@ -43,8 +43,12 @@ import docker
 log = logging.getLogger(__name__)
 
 DEFAULT_DATASETS_BASE_URL = "https://www.dei.unipd.it/~ceccarello/orthogonal-datasets"
-REMOTE_DATA_DIR   = "/data"          # where datasets are staged on the EC2 host
-REMOTE_DOCKER_TCP = 2375             # socat bridge port on the host (localhost only)
+REMOTE_DATA_DIR = "/data"            # where datasets are staged on the EC2 host
+
+# Command that bridges the host's Docker socket to stdin/stdout.  Shipped with
+# the Docker CLI itself (>= 18.09), so nothing extra has to be installed, and
+# `sudo` sidesteps the root-owned socket's permissions.
+REMOTE_DOCKER_DIAL = "sudo docker system dial-stdio"
 
 
 # ---------------------------------------------------------------------------
@@ -91,20 +95,22 @@ class LocalRunner:
 
 
 # ---------------------------------------------------------------------------
-# TCP <-> SSH channel forwarder (paramiko direct-tcpip)
+# TCP <-> SSH channel forwarder (docker system dial-stdio)
 # ---------------------------------------------------------------------------
 
 class _PortForward:
     """
-    Accepts connections on a local ephemeral TCP port and forwards each of them,
-    over an existing paramiko SSH transport, to ``127.0.0.1:<remote_port>`` on
-    the remote host.  Used to reach the host's Docker socket (exposed there by a
-    localhost-only ``socat`` bridge) as a plain ``tcp://127.0.0.1:<port>`` URL.
+    Accepts connections on a local ephemeral TCP port and pipes each of them,
+    over its own paramiko exec channel, into ``docker system dial-stdio`` on the
+    remote host — which in turn talks to the host's Docker socket.  The Docker
+    SDK then reaches the remote daemon through a plain ``tcp://127.0.0.1:<port>``
+    URL, with no daemon reconfiguration, extra packages or listening port on the
+    host side.
     """
 
-    def __init__(self, transport, remote_port: int):
+    def __init__(self, transport, remote_command: str):
         self._transport = transport
-        self._remote_port = remote_port
+        self._remote_command = remote_command
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server.bind(("127.0.0.1", 0))
@@ -130,31 +136,35 @@ class _PortForward:
 
     def _handle(self, sock: socket.socket):
         try:
-            chan = self._transport.open_channel(
-                "direct-tcpip",
-                ("127.0.0.1", self._remote_port),
-                sock.getpeername(),
-            )
+            chan = self._transport.open_session()
+            chan.exec_command(self._remote_command)
         except Exception as exc:
             log.debug("forward: channel open failed: %s", exc)
-            sock.close()
-            return
-        if chan is None:
             sock.close()
             return
         try:
             while True:
                 r, _, _ = select.select([sock, chan], [], [], 1.0)
                 if sock in r:
-                    data = sock.recv(4096)
+                    data = sock.recv(65536)
                     if not data:
                         break
                     chan.sendall(data)
                 if chan in r:
-                    data = chan.recv(4096)
-                    if not data:
+                    # stderr carries the remote command's own diagnostics (a
+                    # missing binary, a sudo refusal); surface them instead of
+                    # letting the SDK report a bare connection reset.
+                    if chan.recv_stderr_ready():
+                        err = chan.recv_stderr(65536).decode("utf-8", "replace").strip()
+                        if err:
+                            log.error("[host] %s: %s", self._remote_command, err)
+                    if chan.recv_ready():
+                        data = chan.recv(65536)
+                        if not data:
+                            break
+                        sock.sendall(data)
+                    elif chan.eof_received or chan.exit_status_ready():
                         break
-                    sock.sendall(data)
         except Exception:
             pass
         finally:
@@ -175,18 +185,19 @@ class _PortForward:
 # AWS backend
 # ---------------------------------------------------------------------------
 
-# Cloud-init run at boot: make sure Docker + socat are present and Docker is up.
-# Harmless if the AMI already has them.
+# Cloud-init run at boot: make sure Docker is present and running.  Harmless if
+# the AMI already ships it, which is the common case.
 _DEFAULT_USER_DATA = """#!/bin/bash
 set -x
 if ! command -v docker >/dev/null 2>&1; then
     curl -fsSL https://get.docker.com | sh
 fi
 usermod -aG docker {ssh_user} || true
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y || true
-apt-get install -y socat curl || true
 systemctl enable --now docker || true
+if ! command -v curl >/dev/null 2>&1; then   # datasets are staged with curl
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y && apt-get install -y curl
+fi
 """
 
 
@@ -232,7 +243,6 @@ class AwsRunner:
             self._connect_ssh(host)
             self._wait_docker_ready()
             self._stage_datasets()
-            self._start_socat_bridge()
             self._open_docker_client()
         except Exception:
             # Never leak a running instance if setup fails partway through.
@@ -387,32 +397,17 @@ class AwsRunner:
             )
         log.info("Datasets staged in %s", REMOTE_DATA_DIR)
 
-    def _start_socat_bridge(self):
-        # Expose the root-owned Docker socket on a localhost-only TCP port so we
-        # can reach it via an SSH-forwarded plain TCP connection.
-        self._ssh_exec("sudo apt-get install -y socat >/dev/null 2>&1 || true", check=False)
-        # Kill any stale bridge in its OWN command. The `[s]ocat` bracket trick
-        # keeps the pattern from matching this very command line (which contains
-        # the literal text "socat...PORT") and killing our own SSH shell — that
-        # self-match returns rc=-1 from paramiko and aborts the run.
-        self._ssh_exec(
-            f"sudo pkill -f '[s]ocat.*{REMOTE_DOCKER_TCP}' 2>/dev/null || true",
-            check=False,
-        )
-        # Launch the bridge in a separate command so no socat pattern is present
-        # to self-match. Output is redirected to a file, so the SSH channel
-        # closes cleanly (rc=0) once bash backgrounds the process and returns.
-        self._ssh_exec(
-            f"sudo bash -c 'nohup socat "
-            f"TCP-LISTEN:{REMOTE_DOCKER_TCP},bind=127.0.0.1,reuseaddr,fork "
-            f"UNIX-CONNECT:/var/run/docker.sock >/tmp/socat.log 2>&1 &'"
-        )
-        time.sleep(1)
-
     def _open_docker_client(self, timeout: int = 60):
-        self._forward = _PortForward(self._ssh.get_transport(), REMOTE_DOCKER_TCP).start()
+        # Fail loudly here rather than through a stream of refused channels: the
+        # forward is only as good as this command.
+        if self._ssh_exec(f"{REMOTE_DOCKER_DIAL} </dev/null >/dev/null", check=False) != 0:
+            raise RuntimeError(
+                f"{REMOTE_DOCKER_DIAL!r} does not work on the host; the Docker CLI "
+                "must be >= 18.09 and the SSH user must have passwordless sudo."
+            )
+        self._forward = _PortForward(self._ssh.get_transport(), REMOTE_DOCKER_DIAL).start()
         base_url = f"tcp://127.0.0.1:{self._forward.port}"
-        log.info("Connecting Docker SDK via %s -> host :%d", base_url, REMOTE_DOCKER_TCP)
+        log.info("Connecting Docker SDK via %s -> host %s", base_url, REMOTE_DOCKER_DIAL)
         deadline = time.monotonic() + timeout
         last_exc = None
         while time.monotonic() < deadline:

@@ -5,22 +5,26 @@
 
 # Scenarios to run for every team. Each team's image must define these in its
 # scenarios.yaml; any it does not define is recorded as a failed run.
-scenarios = ["high_recall", "fast", "memory"]
+scenarios = [
+    "high_recall",
+    # "fast",
+    # "memory"
+]
 
 # Datasets to evaluate against (paths to the HDF5 files under datasets/).
 datasets = [
-    # "datasets/fashion-mnist-784-euclidean.hdf5",
-    "datasets/agnews-mxbai-private.hdf5",
-    "datasets/celeba-resnet-private.hdf5",
-    "datasets/gooaq-distilroberta-private.hdf5",
-    "datasets/imagenet-clip-private.hdf5",
-    "datasets/landmark-nomic-private.hdf5",
-    "datasets/simplewiki-openai-private.hdf5",
-    "datasets/yahoo-minilm-private.hdf5"
+    "datasets/fashion-mnist-784-euclidean.hdf5",
+    # "datasets/agnews-mxbai-private.hdf5",
+    # "datasets/celeba-resnet-private.hdf5",
+    # "datasets/gooaq-distilroberta-private.hdf5",
+    # "datasets/imagenet-clip-private.hdf5",
+    # "datasets/landmark-nomic-private.hdf5",
+    # "datasets/simplewiki-openai-private.hdf5",
+    # "datasets/yahoo-minilm-private.hdf5"
 ]
 
 # Optional overrides (defaults shown).
-db      = "results-gpu.db"
+db      = "results-aws.db"
 timeout = 1800
 k       = 100
 gpu     = true
@@ -32,17 +36,18 @@ gpu     = true
 # from `datasets_base_url`; locally-built images are shipped with docker save/load.
 # Override per-invocation with `--backend aws` / `--backend local`.
 #
-# [runner]
-# backend       = "aws"            # "local" (default) | "aws"
+[runner]
+backend       = "aws"            # "local" (default) | "aws"
 # instance_type = "c7i.4xlarge"    # any EC2 instance type
-# region        = "eu-west-1"
-# ami           = "ami-xxxxxxxx"   # Ubuntu AMI; user-data installs docker if missing
-# key_name      = "orthogonal"     # existing EC2 key pair name
-# key_path      = "~/.ssh/orthogonal.pem"   # local private key for SSH
-# security_group_ids = ["sg-xxxx"] # must allow inbound SSH from where the evaluator runs
-# volume_size_gb = 100             # root EBS size (datasets can be large)
-# terminate_after = true           # set false to keep the instance for debugging
-# # datasets_base_url = "https://www.dei.unipd.it/~ceccarello/orthogonal-datasets"
+instance_type = "g4dn.xlarge"
+region        = "eu-west-1"
+ami           = "ami-0eeae0743b9ce764c"   # Ubuntu AMI; user-data installs docker if missing
+key_name      = "orthogonal-key"     # existing EC2 key pair name
+key_path      = "~/.ssh/orthogonal-key.pem"   # local private key for SSH
+security_group_ids = ["sg-09d5cde2d43d061fd"] # must allow inbound SSH from where the evaluator runs
+volume_size_gb = 100             # root EBS size (datasets can be large)
+terminate_after = true           # set false to keep the instance for debugging
+datasets_base_url = "https://www.dei.unipd.it/~ceccarello/orthogonal-datasets"
 
 # Teams — one table per submission in the competitors/ directory.
 # [[teams]]
@@ -53,9 +58,9 @@ gpu     = true
 name  = "friendly-neighborhood-solvers"
 image = "ortho-prelim-1:sherlock"
 
-# [[teams]]
-# name  = "faiss-hnsw-baseline"
-# image = "ann-orthogonal/faiss"
+[[teams]]
+name  = "faiss-hnsw-baseline"
+image = "ann-orthogonal/faiss"
 
 # [[teams]]
 # name  = "annarchy"

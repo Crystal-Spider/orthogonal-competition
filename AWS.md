@@ -55,7 +55,7 @@ Two sizing notes:
 Choosing an AMI
 ---------------
 
-`_DEFAULT_USER_DATA` in `runner.py` installs only Docker and socat — **it does
+`_DEFAULT_USER_DATA` in `runner.py` installs only Docker — **it does
 not install NVIDIA drivers or the container toolkit**. On a plain Ubuntu AMI the
 container's `device_requests` will therefore fail.
 

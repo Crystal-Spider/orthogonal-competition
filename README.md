@@ -83,7 +83,7 @@ it, and terminates it when finished. Specifically it:
 Prerequisites: valid AWS credentials in the environment (e.g. `AWS_PROFILE`), an
 existing EC2 **key pair** whose private key is at `key_path`, a **security group**
 allowing inbound SSH from wherever you run the evaluator, and an Ubuntu **AMI**
-(Docker and socat are installed by user-data if absent). The `--backend` flag
+(Docker is installed by user-data if absent). The `--backend` flag
 overrides whatever the config specifies.
 
 See [`AWS.md`](AWS.md) for which instance type and AMI to pick — in particular
