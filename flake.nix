@@ -58,8 +58,9 @@
             docker
             pyyaml
             icecream
-            boto3      # EC2 provisioning for the AWS runner backend
-            paramiko   # SSH transport for the AWS runner backend
+            umap-learn
+            boto3 # EC2 provisioning for the AWS runner backend
+            paramiko # SSH transport for the AWS runner backend
           ];
         };
       }
