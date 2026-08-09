@@ -13,14 +13,14 @@ scenarios = [
 
 # Datasets to evaluate against (paths to the HDF5 files under datasets/).
 datasets = [
-    "datasets/fashion-mnist-784-euclidean.hdf5",
-    # "datasets/agnews-mxbai-private.hdf5",
-    # "datasets/celeba-resnet-private.hdf5",
-    # "datasets/gooaq-distilroberta-private.hdf5",
-    # "datasets/imagenet-clip-private.hdf5",
-    # "datasets/landmark-nomic-private.hdf5",
-    # "datasets/simplewiki-openai-private.hdf5",
-    # "datasets/yahoo-minilm-private.hdf5"
+    # "datasets/fashion-mnist-784-euclidean.hdf5",
+    "datasets/agnews-mxbai-public.hdf5",
+    "datasets/celeba-resnet-public.hdf5",
+    "datasets/gooaq-distilroberta-public.hdf5",
+    "datasets/imagenet-clip-public.hdf5",
+    "datasets/landmark-nomic-public.hdf5",
+    "datasets/simplewiki-openai-public.hdf5",
+    "datasets/yahoo-minilm-public.hdf5"
 ]
 
 # Optional overrides (defaults shown).
@@ -38,21 +38,20 @@ gpu     = true
 #
 [runner]
 backend       = "aws"            # "local" (default) | "aws"
-# instance_type = "c7i.4xlarge"    # any EC2 instance type
-instance_type = "g4dn.xlarge"
-region        = "eu-west-1"
+instance_type = "g7.2xlarge"
+region        = "us-east-2"
 ami           = "ami-0eeae0743b9ce764c"   # Ubuntu AMI; user-data installs docker if missing
-key_name      = "orthogonal-key"     # existing EC2 key pair name
-key_path      = "~/.ssh/orthogonal-key.pem"   # local private key for SSH
-security_group_ids = ["sg-09d5cde2d43d061fd"] # must allow inbound SSH from where the evaluator runs
+key_name      = "orthogonal-us-east-2"     # existing EC2 key pair name
+key_path      = "~/.ssh/orthogonal-us-east-2.pem"   # local private key for SSH
+security_group_ids = ["sg-0061338ead1486346"] # must allow inbound SSH from where the evaluator runs
 volume_size_gb = 100             # root EBS size (datasets can be large)
 terminate_after = true           # set false to keep the instance for debugging
 datasets_base_url = "https://www.dei.unipd.it/~ceccarello/orthogonal-datasets"
 
 # Teams — one table per submission in the competitors/ directory.
-# [[teams]]
-# name  = "neighbors-grass"
-# image = "neighbors-grass/ann:latest"
+[[teams]]
+name  = "neighbors-grass"
+image = "neighbors-grass/ann:latest"
 
 [[teams]]
 name  = "friendly-neighborhood-solvers"
@@ -62,22 +61,22 @@ image = "ortho-prelim-1:sherlock"
 name  = "faiss-hnsw-baseline"
 image = "ann-orthogonal/faiss"
 
-# [[teams]]
-# name  = "annarchy"
-# image = "annarchy/nns:latest"
+[[teams]]
+name  = "annarchy"
+image = "annarchy/nns:latest"
 
-# [[teams]]
-# name  = "close-enough"
-# image = "close-enough:latest"
+[[teams]]
+name  = "close-enough"
+image = "close-enough:latest"
 
-# [[teams]]
-# name  = "annvedi"
-# image = "annvedi/nns:latest"
+[[teams]]
+name  = "annvedi"
+image = "annvedi/nns:latest"
 
-# [[teams]]
-# name  = "kinda-neighbors"
-# image = "visonfranc/kinda-neighbors:latest"
+[[teams]]
+name  = "kinda-neighbors"
+image = "visonfranc/kinda-neighbors:latest"
 
-# [[teams]]
-# name  = "finding-nnemo"
-# image = "finding-nnemo/nns:latest"
+[[teams]]
+name  = "finding-nnemo"
+image = "finding-nnemo/nns:latest"
