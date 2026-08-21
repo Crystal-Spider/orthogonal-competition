@@ -51,6 +51,14 @@ Dory and Marie Kondo additionally apply the README's rule that a run must stay
 within twice the baseline's query time, which ``evaluator.py`` does not.
 The hub page names no winner on purpose: watch the races first.
 
+Every page is drawn for a projector.  The layout is a 1600 x 900 slide: a race
+is that frame exactly, centred and letterboxed in whatever window it is opened
+in, while the document pages take their width from it and flow downwards.  One
+rem is 16px at that size and the stylesheets are written in rem throughout, so
+the type, the standings board and the chrome all scale with the frame instead of
+staying at desk-reading size on a lecture hall wall.  Below 900px wide there is
+nothing left to letterbox and the race falls back to a plain scrolling page.
+
     python animate.py
     python animate.py --pace-car
     python animate.py --scenario fast --recall-threshold 0.8 --laps 3
@@ -880,7 +888,7 @@ def dataset_codes(datasets: Iterable[str]) -> dict[str, str]:
     return {d: codes[h] for d, h in heads.items()}
 
 
-def _car_svg(size: int, delay: str = "", spin: bool = True) -> str:
+def _car_svg(size: float, delay: str = "", spin: bool = True) -> str:
     """The shared car silhouette, tinted through the --car custom property.
 
     The race page has to tint its cars from JS, because the fill is a
@@ -889,7 +897,10 @@ def _car_svg(size: int, delay: str = "", spin: bool = True) -> str:
     stay theme-aware without a line of script.  The viewBox is centred on the
     car's own origin so it can spin without clipping.
     """
-    return (f'<svg class="carart" width="{size}" height="{size}" '
+    # Sized in rem, like every other length on these pages: the whole document
+    # scales with the slide, and a car pinned to a pixel size would shrink
+    # against the card around it on a projector.
+    return (f'<svg class="carart" style="width:{size}rem;height:{size}rem" '
             f'viewBox="-23 -23 46 46" aria-hidden="true">'
             f'<g class="{"spin" if spin else "parked"}"{delay}>{CAR_SVG}</g></svg>')
 
@@ -909,7 +920,7 @@ def render_paddock(roster: list[dict], scenario: str) -> str:
         cards.append(
             f'<article class="{klass}" '
             f'style="--car-l:{e["light"]};--car-d:{e["dark"]}">'
-            + _car_svg(132, f' style="animation-delay:-{i * 2.6:.1f}s"')
+            + _car_svg(12.5, f' style="animation-delay:-{i * 2.6:.1f}s"')
             + f'<div class="card-body"><div class="badge">{e["tag"]}</div>'
             f'<h2>{e["team"]}</h2>'
             f'<p class="record">{record}</p></div>'
@@ -963,7 +974,7 @@ def render_standings(board: Board, scored: list[dict], look: dict[str, dict],
             f'<div class="step p{slot + 1}" style="{style(e["team"])}">'
             f'<div class="who"><div class="crown">'
             f'{"&#127942;" if slot == 0 else ""}</div>'
-            + _car_svg(92, spin=False)     # the podium is parc fermé, not a spin
+            + _car_svg(6.5, spin=False)     # the podium is parc fermé, not a spin
             + f'<div class="badge">{tag}</div><div class="name">{e["team"]}</div>'
             f'<div class="pts">{e["points"]} pts</div></div>'
             f'<div class="block">{slot + 1}</div></div>'
@@ -1034,7 +1045,7 @@ def render_standings_hub(counts: dict[str, int], total: int) -> str:
         n = counts.get(b.slug, 0)
         cards.append(
             f'<a class="card" href="{b.file}">'
-            + _car_svg(104, f' style="animation-delay:-{i * 3.1:.1f}s"')
+            + _car_svg(9.5, f' style="animation-delay:-{i * 3.1:.1f}s"')
             + f'<div class="card-body"><h2>{b.title}</h2>'
             f'<p class="rule">{b.rule}</p>'
             f'<p class="terms"><span class="chip">{b.scenario}</span>'
@@ -1140,22 +1151,34 @@ _UMAP_CSS = """
 # Shared chrome for the three static pages (index, paddock, standings).  The
 # race page keeps its own layout: it is a full-height app, these are documents.
 _PAGE_CSS = """
+/* These pages are read off a projector, so they are laid out on the same 1600px
+   wide slide as the races: 1rem is 16px at that width and every length below is
+   in rem, which makes the whole document scale as one.  Unlike a race, a
+   standings table can run past the bottom of the screen, so the height is left
+   to flow and the page scrolls; only the width drives the scale.  The clamp
+   keeps a narrow laptop window legible and stops a 4K panel from turning the
+   body text into a billboard. */
+html { font-size: clamp(12px, 1vw, 26px); }
 * { box-sizing: border-box; }
 body {
-  margin: 0; padding: 30px 28px 60px; background: var(--surface-0); color: var(--text-1);
-  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  margin: 0; padding: 2.4rem 2.2rem 3.75rem; background: var(--surface-0); color: var(--text-1);
+  font: 1.375rem/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
-.wrap { max-width: 1180px; margin: 0 auto; }
+.wrap { max-width: 88rem; margin: 0 auto; }
 header.page {
-  max-width: 1180px; margin: 0 auto 26px; display: flex; align-items: flex-end;
-  gap: 16px; flex-wrap: wrap;
+  max-width: 88rem; margin: 0 auto 2rem; display: flex; align-items: flex-end;
+  gap: 1.25rem; flex-wrap: wrap;
+  /* At slide sizes the title can push the nav or the toggle onto a second row;
+     ending the rows keeps whatever wraps tucked under the nav on the right
+     rather than stranded on the left margin. */
+  justify-content: flex-end;
 }
-h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -.02em; }
+h1 { margin: 0 0 .3rem; font-size: 2.4rem; letter-spacing: -.02em; }
 header.page p { margin: 0; color: var(--text-2); }
 .spacer { flex: 1; }
-nav { display: flex; gap: 3px; }
+nav { display: flex; gap: .25rem; }
 nav a {
-  text-decoration: none; color: var(--text-2); font-size: 13px; padding: 6px 12px;
+  text-decoration: none; color: var(--text-2); font-size: 1.2rem; padding: .4rem .8rem;
   border-radius: 999px; border: 1px solid transparent;
 }
 nav a:hover { background: var(--surface-2); color: var(--text-1); }
@@ -1165,22 +1188,22 @@ nav a[aria-current="page"] {
 }
 /* The trophy strip under the header: the same pills one level quieter, and it
    wraps onto a second line rather than pushing the header wide on a phone. */
-nav.sub { max-width: 1180px; margin: -14px auto 24px; flex-wrap: wrap; gap: 4px; }
+nav.sub { max-width: 88rem; margin: -1rem auto 1.8rem; flex-wrap: wrap; gap: .3rem; }
 nav.sub a {
-  font-size: 12.5px; padding: 5px 11px; border-color: var(--border);
+  font-size: 1.3rem; padding: .4rem .85rem; border-color: var(--border);
   background: var(--surface-1);
 }
 nav.sub a[aria-current="page"] { background: var(--surface-2); }
 button.theme {
-  font: inherit; font-size: 15px; line-height: 1; cursor: pointer; padding: 6px 9px;
+  font: inherit; font-size: 1.5rem; line-height: 1; cursor: pointer; padding: .45rem .7rem;
   background: var(--surface-1); color: var(--text-2);
-  border: 1px solid var(--border); border-radius: 8px;
+  border: 1px solid var(--border); border-radius: .6rem;
 }
 button.theme:hover { color: var(--text-1); }
-.muted { color: var(--text-3); font-size: 12px; }
+.muted { color: var(--text-3); font-size: 1.25rem; }
 .badge {
-  display: inline-block; font-size: 11px; font-weight: 800; letter-spacing: .07em;
-  padding: 3px 7px; border-radius: 6px; background: var(--car); color: #fff;
+  display: inline-block; font-size: 1.15rem; font-weight: 800; letter-spacing: .07em;
+  padding: .2rem .5rem; border-radius: .45rem; background: var(--car); color: #fff;
   text-shadow: 0 1px 2px rgba(0,0,0,.35);
 }
 
@@ -1237,22 +1260,22 @@ PADDOCK_TEMPLATE = """<!doctype html>
 __THEME_CSS__
 __PAGE_CSS__
 .grid {
-  max-width: 1180px; margin: 0 auto; display: grid; gap: 18px;
-  grid-template-columns: repeat(auto-fill, minmax(252px, 1fr));
+  max-width: 88rem; margin: 0 auto; display: grid; gap: 1.4rem;
+  grid-template-columns: repeat(auto-fill, minmax(24rem, 1fr));
 }
 .card {
-  background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 1rem;
   overflow: hidden; display: flex; flex-direction: column; align-items: center;
-  padding: 14px 16px 16px;
+  padding: 1.1rem 1.25rem 1.25rem;
 }
-.card .carart { display: block; margin: 6px 0 2px; }
+.card .carart { display: block; margin: .4rem 0 .15rem; }
 .card-body { text-align: center; width: 100%; }
 .card h2 {
-  margin: 8px 0 6px; font-size: 14.5px; font-weight: 650; overflow-wrap: anywhere;
+  margin: .6rem 0 .4rem; font-size: 1.55rem; font-weight: 650; overflow-wrap: anywhere;
 }
-.card .record { margin: 0; font-size: 13px; color: var(--text-2); }
-.card .muted { margin: 5px 0 0; }
-.wins { display: block; margin-top: 4px; font-weight: 600; color: var(--text-1); }
+.card .record { margin: 0; font-size: 1.375rem; color: var(--text-2); }
+.card .muted { margin: .35rem 0 0; }
+.wins { display: block; margin-top: .3rem; font-weight: 600; color: var(--text-1); }
 .card.dns { opacity: .72; border-style: dashed; }
 .card.dns .carart { opacity: .55; }
 .card.pace .badge { letter-spacing: .04em; }
@@ -1288,37 +1311,37 @@ STANDINGS_TEMPLATE = """<!doctype html>
 __THEME_CSS__
 __PAGE_CSS__
 .podium {
-  display: flex; align-items: flex-end; justify-content: center; gap: 14px;
-  margin: 8px auto 34px; max-width: 720px; flex-wrap: wrap;
+  display: flex; align-items: flex-end; justify-content: center; gap: 1.1rem;
+  margin: .6rem auto 2.6rem; max-width: 60rem; flex-wrap: wrap;
 }
-.step { flex: 1 1 180px; max-width: 240px; text-align: center; }
-.step .who { padding-bottom: 10px; }
-.step .carart { display: block; margin: 0 auto 2px; }
+.step { flex: 1 1 15rem; max-width: 19rem; text-align: center; }
+.step .who { padding-bottom: .8rem; }
+.step .carart { display: block; margin: 0 auto .15rem; }
 /* The crown row and the two-line name slot are reserved on every step, so the
    three cars line up by podium height instead of by how long a team name is. */
-.step .crown { height: 32px; font-size: 26px; line-height: 1.15; }
+.step .crown { height: 2.2rem; font-size: 2.2rem; line-height: 1.15; }
 .step .name {
-  font-size: 14px; font-weight: 650; margin-top: 6px; overflow-wrap: anywhere;
+  font-size: 1.5rem; font-weight: 650; margin-top: .45rem; overflow-wrap: anywhere;
   min-height: 2.6em;
 }
-.step .pts { font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.step .pts { font-size: 1.375rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
 .step .block {
-  border: 1px solid var(--border); border-bottom: 0; border-radius: 10px 10px 0 0;
+  border: 1px solid var(--border); border-bottom: 0; border-radius: .8rem .8rem 0 0;
   background: var(--surface-1); color: var(--text-3);
-  font-size: 20px; font-weight: 800; display: flex; align-items: flex-end;
-  justify-content: center; padding-bottom: 8px;
+  font-size: 2.1rem; font-weight: 800; display: flex; align-items: flex-end;
+  justify-content: center; padding-bottom: .6rem;
 }
-.step.p1 .block { height: 96px; background: var(--surface-2); color: var(--text-2); }
-.step.p2 .block { height: 68px; }
-.step.p3 .block { height: 52px; }
+.step.p1 .block { height: 7rem; background: var(--surface-2); color: var(--text-2); }
+.step.p2 .block { height: 5rem; }
+.step.p3 .block { height: 3.8rem; }
 .tablewrap {
-  max-width: 1180px; margin: 0 auto; overflow-x: auto;
-  border: 1px solid var(--border); border-radius: 12px; background: var(--surface-1);
+  max-width: 88rem; margin: 0 auto; overflow-x: auto;
+  border: 1px solid var(--border); border-radius: .9rem; background: var(--surface-1);
 }
-table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th, td { padding: 9px 12px; text-align: left; white-space: nowrap; }
+table { border-collapse: collapse; width: 100%; font-size: 1.375rem; }
+th, td { padding: .65rem .75rem; text-align: left; white-space: nowrap; }
 thead th {
-  font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em;
+  font-size: 1.1rem; text-transform: uppercase; letter-spacing: .07em;
   color: var(--text-3); font-weight: 600; border-bottom: 1px solid var(--border);
 }
 tbody tr + tr td { border-top: 1px solid var(--border); }
@@ -1326,17 +1349,17 @@ tbody tr + tr td { border-top: 1px solid var(--border); }
 .rank { color: var(--text-3); width: 1%; }
 .total { font-weight: 700; }
 .swatch {
-  display: inline-block; width: 10px; height: 10px; border-radius: 3px;
-  background: var(--car); margin-right: 8px; vertical-align: middle;
+  display: inline-block; width: .9rem; height: .9rem; border-radius: .25rem;
+  background: var(--car); margin-right: .6rem; vertical-align: middle;
 }
-.badge.sm { margin-right: 8px; padding: 2px 6px; font-size: 10px; }
+.badge.sm { margin-right: .6rem; padding: .15rem .45rem; font-size: 1.05rem; }
 /* Stacked cell: the points a run scored, and the measurement that earned them.
    Scoped to the table -- .step .pts is the podium's own points line. */
 td .pts { display: block; }
-td .met { display: block; margin-top: 1px; font-size: 10.5px; color: var(--text-3); }
-.legend { max-width: 1180px; margin: 12px auto 0; color: var(--text-3); font-size: 12px; }
-.note { max-width: 1180px; margin: 0 auto 18px; color: var(--text-2); }
-.note code { font-size: 12px; }
+td .met { display: block; margin-top: .1rem; font-size: 1.1rem; color: var(--text-3); }
+.legend { max-width: 88rem; margin: 1rem auto 0; color: var(--text-3); font-size: 1.25rem; }
+.note { max-width: 88rem; margin: 0 auto 1.4rem; color: var(--text-2); }
+.note code { font-size: 1.25rem; }
 </style>
 </head>
 <body>
@@ -1383,30 +1406,30 @@ HUB_TEMPLATE = """<!doctype html>
 __THEME_CSS__
 __PAGE_CSS__
 .grid {
-  max-width: 1180px; margin: 0 auto; display: grid; gap: 18px;
-  grid-template-columns: repeat(auto-fill, minmax(288px, 1fr));
+  max-width: 88rem; margin: 0 auto; display: grid; gap: 1.4rem;
+  grid-template-columns: repeat(auto-fill, minmax(26rem, 1fr));
 }
 .card {
   display: flex; flex-direction: column; align-items: center; text-decoration: none;
   color: inherit; background: var(--surface-1); border: 1px solid var(--border);
-  border-radius: 14px; padding: 16px 18px 18px;
+  border-radius: 1rem; padding: 1.25rem 1.4rem 1.4rem;
   transition: transform .18s, border-color .18s, box-shadow .18s;
 }
-.card:hover { transform: translateY(-3px); border-color: var(--text-3); box-shadow: var(--shadow); }
+.card:hover { transform: translateY(-.2rem); border-color: var(--text-3); box-shadow: var(--shadow); }
 /* Every trophy car is the neutral grey: a coloured one would give the game away
    before the visitor has opened a single board. */
 .card { --car: var(--neutral); }
-.card .carart { display: block; margin: 4px 0 2px; }
+.card .carart { display: block; margin: .3rem 0 .15rem; }
 .card-body { text-align: center; width: 100%; }
-.card h2 { margin: 10px 0 6px; font-size: 16px; font-weight: 650; }
-.card .rule { margin: 0 0 10px; font-size: 13px; color: var(--text-2); }
-.card .terms { margin: 0; font-size: 12px; color: var(--text-3); }
+.card h2 { margin: .8rem 0 .45rem; font-size: 1.75rem; font-weight: 650; }
+.card .rule { margin: 0 0 .8rem; font-size: 1.375rem; color: var(--text-2); }
+.card .terms { margin: 0; font-size: 1.25rem; color: var(--text-3); }
 .chip {
-  display: inline-block; margin-right: 6px; padding: 2px 7px; border-radius: 6px;
-  background: var(--surface-2); color: var(--text-2); font-size: 11px;
+  display: inline-block; margin-right: .45rem; padding: .15rem .55rem; border-radius: .45rem;
+  background: var(--surface-2); color: var(--text-2); font-size: 1.15rem;
   font-weight: 600; letter-spacing: .02em;
 }
-.card .muted { margin: 8px 0 0; }
+.card .muted { margin: .6rem 0 0; }
 </style>
 </head>
 <body>
@@ -1439,35 +1462,49 @@ RACE_TEMPLATE = """<!doctype html>
 <style>
 __THEME_CSS__
 __UMAP_CSS__
+/* A race is a slide: a fixed 1600 x 900 (16:9) frame, centred and letterboxed
+   in whatever window or projector it lands in.  1rem is 16px at that size, and
+   min(1vw, 1.7778vh) holds that ratio as the frame grows, so every length below
+   is written in rem and the page scales as one piece -- text included, which is
+   the whole point on a projector at the back of a lecture hall.  Lengths inside
+   the track SVG stay in user units: the viewBox already scales them. */
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html {
+  height: 100%; font-size: min(1vw, 1.7778vh); background: var(--surface-0);
+  display: flex; align-items: center; justify-content: center;
+}
 body {
-  margin: 0; background: var(--surface-0); color: var(--text-1);
-  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  margin: 0; width: 100rem; height: 56.25rem;
+  background: var(--surface-0); color: var(--text-1);
+  font: 1.5rem/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   display: flex; flex-direction: column; overflow: hidden;
 }
+/* Everything here has to sit on one line of a 100rem slide -- title, both
+   chips, the nav, the clock and the toggle.  A wrapped header steals height
+   from the track, so the sizes below are budgeted against the longest dataset
+   name in the field and still leave a few rem of slack. */
 header {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  padding: 12px 18px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: .9rem; flex-wrap: wrap;
+  padding: .95rem 1.5rem; border-bottom: 1px solid var(--border);
   background: var(--surface-1);
 }
-header h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+header h1 { margin: 0; font-size: 1.75rem; font-weight: 650; letter-spacing: -.01em; }
 .chip {
-  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
-  padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border);
+  font-size: 1rem; text-transform: uppercase; letter-spacing: .06em;
+  padding: .25rem .6rem; border-radius: 999px; border: 1px solid var(--border);
   color: var(--text-2); background: var(--surface-2);
 }
 .spacer { flex: 1; }
-nav { display: flex; gap: 3px; }
+nav { display: flex; gap: .25rem; }
 nav a {
-  text-decoration: none; color: var(--text-2); font-size: 13px; padding: 5px 11px;
+  text-decoration: none; color: var(--text-2); font-size: 1.15rem; padding: .35rem .7rem;
   border-radius: 999px; border: 1px solid transparent;
 }
 nav a:hover { background: var(--surface-2); color: var(--text-1); }
-.readout { display: flex; gap: 18px; align-items: baseline; }
+.readout { display: flex; gap: 1.4rem; align-items: baseline; }
 .readout div { text-align: right; }
-.readout .k { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-3); }
-.readout .v { font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; }
+.readout .k { font-size: 1.05rem; text-transform: uppercase; letter-spacing: .07em; color: var(--text-3); }
+.readout .v { font-variant-numeric: tabular-nums; font-size: 2rem; font-weight: 600; }
 main { flex: 1; display: flex; min-height: 0; }
 #stage { flex: 1; position: relative; min-width: 0; background: var(--grass); }
 #track-svg { width: 100%; height: 100%; display: block; }
@@ -1484,9 +1521,12 @@ main { flex: 1; display: flex; min-height: 0; }
 .car .wing    { stroke: var(--surface-1); stroke-width: 1.2; }
 .car .wheel   { fill: #1b1b19; }
 .car .cockpit { fill: rgba(0,0,0,.45); }
+/* Sized in track user units, not rem: these ride inside the circuit's viewBox,
+   which scales them with the track rather than with the slide.  Big enough to
+   read from the back of a room without swamping the car underneath. */
 .car .tag {
-  font-size: 11px; font-weight: 700; letter-spacing: .04em; text-anchor: middle;
-  fill: var(--text-1); paint-order: stroke; stroke: var(--surface-1); stroke-width: 3.5;
+  font-size: 17px; font-weight: 700; letter-spacing: .04em; text-anchor: middle;
+  fill: var(--text-1); paint-order: stroke; stroke: var(--surface-1); stroke-width: 5;
   stroke-linejoin: round;
 }
 .car.dnf .body, .car.dnf .wing { opacity: .55; stroke-dasharray: 3 2.5; }
@@ -1499,73 +1539,78 @@ main { flex: 1; display: flex; min-height: 0; }
 .car.out .cockpit { fill: rgba(0,0,0,.22); }
 .car.out .tag     { fill: var(--text-3); }
 .outmark {
-  display: none; font-size: 10px; font-weight: 800; letter-spacing: .12em;
+  display: none; font-size: 15px; font-weight: 800; letter-spacing: .12em;
   text-anchor: middle; fill: var(--kerb-a); paint-order: stroke;
-  stroke: var(--surface-1); stroke-width: 3.5; stroke-linejoin: round;
+  stroke: var(--surface-1); stroke-width: 5; stroke-linejoin: round;
 }
 .car.out .outmark { display: block; }
 
 aside {
-  width: 336px; flex: none; border-left: 1px solid var(--border);
+  width: 29.4rem; flex: none; border-left: 1px solid var(--border);
   background: var(--surface-1); display: flex; flex-direction: column; min-height: 0;
 }
 aside h2 {
-  margin: 0; padding: 12px 16px 8px; font-size: 11px; font-weight: 600;
+  margin: 0; padding: .95rem 1.3rem .6rem; font-size: 1.2rem; font-weight: 600;
   text-transform: uppercase; letter-spacing: .08em; color: var(--text-3);
 }
-#standings { position: relative; margin: 0 10px; flex: none; }
+#standings { position: relative; margin: 0 .8rem; flex: none; }
 .row {
-  position: absolute; left: 0; right: 0; height: 46px; display: flex;
-  align-items: center; gap: 10px; padding: 0 6px; border-radius: 8px;
+  position: absolute; left: 0; right: 0; height: 4.625rem; display: flex;
+  align-items: center; gap: .8rem; padding: 0 .5rem; border-radius: .65rem;
   transition: transform .45s cubic-bezier(.22,1,.36,1);
 }
 .row.lead { background: var(--surface-2); }
 .pos {
-  width: 20px; text-align: right; font-variant-numeric: tabular-nums;
-  font-weight: 700; color: var(--text-3); font-size: 13px;
+  width: 1.7rem; text-align: right; font-variant-numeric: tabular-nums;
+  font-weight: 700; color: var(--text-3); font-size: 1.45rem;
 }
-.swatch { width: 10px; height: 22px; border-radius: 3px; flex: none; }
+.swatch { width: .85rem; height: 2.1rem; border-radius: .25rem; flex: none; }
 .who { flex: 1; min-width: 0; }
 .who .nm {
-  font-size: 13px; font-weight: 600; white-space: nowrap;
+  font-size: 1.5rem; font-weight: 600; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
 }
-.bar { height: 4px; border-radius: 2px; background: var(--surface-2); margin-top: 4px; overflow: hidden; }
-.bar i { display: block; height: 100%; border-radius: 2px; width: 0; }
+.bar { height: .35rem; border-radius: .2rem; background: var(--surface-2); margin-top: .35rem; overflow: hidden; }
+.bar i { display: block; height: 100%; border-radius: .2rem; width: 0; }
 .gap {
-  font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text-2);
-  text-align: right; min-width: 74px;
+  font-variant-numeric: tabular-nums; font-size: 1.3rem; color: var(--text-2);
+  text-align: right; min-width: 6.4rem;
 }
-.gap .flag { font-size: 10px; letter-spacing: .05em; color: var(--text-3); text-transform: uppercase; }
-.tagline { font-size: 11px; color: var(--text-3); }
+.gap .flag { font-size: 1.05rem; letter-spacing: .05em; color: var(--text-3); text-transform: uppercase; }
+.tagline { font-size: 1.2rem; color: var(--text-3); }
 
 .row.retired .swatch { opacity: .4; }
 .row.retired .nm { color: var(--text-3); font-weight: 500; }
 .row.retired .pos { color: var(--text-3); }
 .row.retired .gap .flag { color: var(--kerb-a); }
 
-.notes { padding: 6px 16px 14px; border-top: 1px solid var(--border); margin-top: auto; }
-.notes .dns { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); padding: 2px 0; }
-.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+.notes { padding: .5rem 1.3rem 1.1rem; border-top: 1px solid var(--border); margin-top: auto; }
+.notes .dns { display: flex; align-items: center; gap: .6rem; font-size: 1.3rem; color: var(--text-2); padding: .15rem 0; }
+.dot { width: .7rem; height: .7rem; border-radius: 50%; flex: none; display: inline-block; }
 
 footer {
-  display: flex; align-items: center; gap: 12px; padding: 10px 18px;
+  display: flex; align-items: center; gap: 1rem; padding: .8rem 1.5rem;
   border-top: 1px solid var(--border); background: var(--surface-1);
 }
 button {
-  font: inherit; font-size: 13px; color: var(--text-1); background: var(--surface-2);
-  border: 1px solid var(--border); border-radius: 7px; padding: 5px 11px; cursor: pointer;
+  font: inherit; font-size: 1.375rem; color: var(--text-1); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: .55rem; padding: .4rem .9rem; cursor: pointer;
 }
 button:hover { border-color: var(--text-3); }
 button[aria-pressed="true"] { background: var(--text-1); color: var(--surface-1); border-color: var(--text-1); }
-.grp { display: flex; gap: 4px; }
-#scrub { flex: 1; min-width: 80px; accent-color: var(--text-2); }
+.grp { display: flex; gap: .3rem; }
+/* The native slider draws itself in device pixels, so it is the one control
+   that will not scale on its own; the explicit height keeps it in proportion
+   with the buttons beside it. */
+#scrub { flex: 1; min-width: 6rem; height: 1.8rem; accent-color: var(--text-2); }
 
-table { border-collapse: collapse; width: 100%; font-size: 12px; }
-th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); }
-th { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); font-weight: 600; }
+/* Five columns have to fit the width of the standings column, so this one
+   table stays a size below the rest of the slide. */
+table { border-collapse: collapse; width: 100%; font-size: 1rem; }
+th, td { text-align: left; padding: .3rem .45rem; border-bottom: 1px solid var(--border); }
+th { font-size: .95rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); font-weight: 600; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-#table-view { display: none; padding: 0 12px 12px; overflow: auto; }
+#table-view { display: none; padding: 0 1rem 1rem; overflow: auto; }
 #table-view.on { display: block; }
 .muted { color: var(--text-3); }
 
@@ -1574,7 +1619,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   position: absolute; inset: 0; pointer-events: none; opacity: 0;
   background-image:
     repeating-conic-gradient(#111 0 25%, #fff 0 50%);
-  background-size: 46px 46px;
+  background-size: 3.6rem 3.6rem;
   mix-blend-mode: normal;
 }
 #sweep.go { animation: sweep 1.15s cubic-bezier(.5,0,.5,1) 1; }
@@ -1586,23 +1631,23 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 }
 #winner {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%) scale(.85);
-  background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px;
-  box-shadow: var(--shadow); padding: 20px 26px; text-align: center;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 1.1rem;
+  box-shadow: var(--shadow); padding: 1.6rem 2.1rem; text-align: center;
   opacity: 0; pointer-events: none; transition: opacity .35s, transform .35s cubic-bezier(.22,1,.36,1);
-  min-width: 280px; max-width: 90%;
+  min-width: 24rem; max-width: 90%;
 }
 #winner.on { opacity: 1; transform: translate(-50%,-50%) scale(1); }
-#winner .trophy { font-size: 34px; line-height: 1; }
-#winner .name { font-size: 22px; font-weight: 700; margin: 6px 0 2px; letter-spacing: -.01em; }
-#winner .sub { color: var(--text-2); font-size: 13px; }
-#winner .stats { display: flex; gap: 20px; justify-content: center; margin-top: 14px; }
+#winner .trophy { font-size: 4.25rem; line-height: 1; }
+#winner .name { font-size: 2.75rem; font-weight: 700; margin: .45rem 0 .15rem; letter-spacing: -.01em; }
+#winner .sub { color: var(--text-2); font-size: 1.5rem; }
+#winner .stats { display: flex; gap: 1.6rem; justify-content: center; margin-top: 1.1rem; }
 #winner .stats div { text-align: center; }
-#winner .stats .k { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-3); }
-#winner .stats .v { font-size: 16px; font-weight: 650; font-variant-numeric: tabular-nums; }
+#winner .stats .k { font-size: 1.05rem; text-transform: uppercase; letter-spacing: .07em; color: var(--text-3); }
+#winner .stats .v { font-size: 2rem; font-weight: 650; font-variant-numeric: tabular-nums; }
 #toast {
-  position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(8px);
-  background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
-  padding: 9px 14px; font-size: 12.5px; color: var(--text-2); box-shadow: var(--shadow);
+  position: absolute; left: 50%; bottom: 1.8rem; transform: translateX(-50%) translateY(.6rem);
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: .8rem;
+  padding: .7rem 1.1rem; font-size: 1.4rem; color: var(--text-2); box-shadow: var(--shadow);
   opacity: 0; transition: opacity .3s, transform .3s; pointer-events: none; max-width: 90%;
 }
 #toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -1615,22 +1660,22 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 #lights {
   position: absolute; inset: 0; display: none; pointer-events: none;
   flex-direction: column; align-items: center; justify-content: flex-start;
-  gap: 14px; padding-top: 7%;
+  gap: 1.1rem; padding-top: 7%;
 }
 #lights.on { display: flex; }
 #gantry {
-  display: flex; gap: 12px; padding: 14px 18px; border-radius: 14px;
+  display: flex; gap: .95rem; padding: 1.1rem 1.4rem; border-radius: 1.1rem;
   background: rgba(12,12,11,.82); box-shadow: var(--shadow);
 }
 #gantry i {
-  width: 30px; height: 30px; border-radius: 50%; display: block;
-  background: #2b2b28; box-shadow: inset 0 2px 4px rgba(0,0,0,.6);
+  width: 2.875rem; height: 2.875rem; border-radius: 50%; display: block;
+  background: #2b2b28; box-shadow: inset 0 .15rem .3rem rgba(0,0,0,.6);
   transition: background .12s ease-out, box-shadow .12s ease-out;
 }
-#gantry i.lit { background: #e5262c; box-shadow: 0 0 16px 3px rgba(229,38,44,.55); }
+#gantry i.lit { background: #e5262c; box-shadow: 0 0 1.25rem .25rem rgba(229,38,44,.55); }
 #cd-num {
-  font-size: 76px; font-weight: 800; letter-spacing: -.04em; line-height: 1;
-  color: var(--text-1); text-shadow: 0 2px 18px var(--surface-0);
+  font-size: 7.5rem; font-weight: 800; letter-spacing: -.04em; line-height: 1;
+  color: var(--text-1); text-shadow: 0 .15rem 1.4rem var(--surface-0);
   font-variant-numeric: tabular-nums;
 }
 #cd-num.go { color: #1f9d3f; animation: gopop .5s ease-out; }
@@ -1645,8 +1690,14 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   #gantry i { transition: none; }
   #cd-num.go { animation: none; }
 }
+/* Below the slide's own width there is nothing to letterbox: fall back to a
+   plain scrolling page at a fixed, readable size rather than shrinking the
+   frame until nothing on it can be read. */
 @media (max-width: 900px) {
+  html { height: auto; display: block; font-size: 16px; }
+  body { width: auto; height: auto; min-height: 100%; overflow: auto; }
   main { flex-direction: column; }
+  #stage { min-height: 60vh; }
   aside { width: auto; border-left: 0; border-top: 1px solid var(--border); }
 }
 </style>
@@ -1809,10 +1860,13 @@ racers.forEach((t, i) => {
   const rot = document.createElementNS(SVGNS, "g");
   rot.innerHTML = '__CAR_SVG__';
   const tag = document.createElementNS(SVGNS, "text");
-  tag.setAttribute("class", "tag"); tag.setAttribute("y", -18);
+  // Alternate rows of the field carry their name a little higher, so two cars
+  // running abreast -- or the pile-up of finishers parked on the line -- do not
+  // print their tags on top of each other.
+  tag.setAttribute("class", "tag"); tag.setAttribute("y", i % 2 ? -37 : -21);
   tag.textContent = t.tag;
   const out = document.createElementNS(SVGNS, "text");
-  out.setAttribute("class", "outmark"); out.setAttribute("y", 24);
+  out.setAttribute("class", "outmark"); out.setAttribute("y", 28);
   out.textContent = "OUT";
   g.appendChild(rot); g.appendChild(tag); g.appendChild(out);
   carsG.appendChild(g);
@@ -1850,9 +1904,9 @@ for (const t of racers) {
 }
 
 // ---- standings rows --------------------------------------------------------
-const ROWH = 46;
+const ROWH = 4.625;                  // rem, matching .row's height in the CSS
 const board = document.getElementById("standings");
-board.style.height = (racers.length * ROWH) + "px";
+board.style.height = (racers.length * ROWH) + "rem";
 racers.forEach(t => {
   const row = document.createElement("div");
   row.className = "row";
@@ -1873,7 +1927,7 @@ racers.forEach(t => {
 // teams that never made the grid
 const notes = document.getElementById("notes");
 if (dns.length) {
-  notes.innerHTML = '<div class="tagline" style="margin-bottom:6px">Did not start</div>' +
+  notes.innerHTML = '<div class="tagline" style="margin-bottom:.45rem">Did not start</div>' +
     dns.map(t => '<div class="dns"><span class="dot" style="background:var(--dns)"></span>' +
       t.team + ' \\u2014 ' + t.status + '</div>').join("");
 }
@@ -1976,7 +2030,7 @@ function frame() {
     // the line instead of stacking on it -- the countdown is the one moment
     // the whole field is meant to be readable.
     const grid = preroll !== null;
-    const s = grid ? LEN - (t._row2 * ROW_GAP + ROW_GAP * .5)
+    const s = grid ? LEN - ((t._row2 + (t._slot > 0 ? .5 : 0)) * ROW_GAP + ROW_GAP * .5)
                    : (t._p >= 1 ? 0 : ((t._p * LAPS) % 1) * LEN);
     const pt = pointAt(s);
     const ux = -Math.sin(pt.a), uy = Math.cos(pt.a);          // unit track normal
@@ -1999,7 +2053,7 @@ function frame() {
     t._g.classList.toggle("done", !t._out && t._p >= 1);
 
     // standings row
-    t._row.style.transform = "translateY(" + (i * ROWH) + "px)";
+    t._row.style.transform = "translateY(" + (i * ROWH) + "rem)";
     t._row.classList.toggle("lead", i === 0 && !t._out);
     t._row.classList.toggle("retired", t._out);
     t._pos.textContent = t._out ? "\\u2014" : (i + 1);
@@ -2171,16 +2225,22 @@ function celebrate(w, order) {
 
 const cv = document.getElementById("confetti"), ctx = cv.getContext("2d");
 let bits = [];
+// The canvas is the one part of the stage measured in device pixels rather than
+// in the slide's rem, so the paper has to be scaled by hand: how many pixels a
+// rem is worth right now is exactly how much bigger a projected frame is than
+// the 1600 x 900 design one.
+const remPx = () => parseFloat(getComputedStyle(document.documentElement).fontSize) / 16;
 function confetti(color) {
   const stage = document.getElementById("stage");
   cv.width = stage.clientWidth; cv.height = stage.clientHeight;
   const hues = [color].concat(racers.map(colorOf));
+  const S = remPx();
   bits = [];
   for (let i = 0; i < 220; i++) {
     bits.push({
       x: cv.width * (.2 + .6 * Math.random()), y: cv.height * .55,
-      vx: (Math.random() - .5) * 12, vy: -6 - Math.random() * 11,
-      w: 4 + Math.random() * 6, h: 3 + Math.random() * 5,
+      vx: (Math.random() - .5) * 12 * S, vy: (-6 - Math.random() * 11) * S,
+      w: (4 + Math.random() * 6) * S, h: (3 + Math.random() * 5) * S,
       rot: Math.random() * 6.28, vr: (Math.random() - .5) * .35,
       c: i % 3 === 0 ? hues[1 + (i % (hues.length - 1))] : color,
       life: 1
@@ -2190,9 +2250,10 @@ function confetti(color) {
 }
 function drawConfetti() {
   ctx.clearRect(0, 0, cv.width, cv.height);
+  const g = .32 * remPx();
   let alive = 0;
   for (const b of bits) {
-    b.vy += .32; b.x += b.vx; b.y += b.vy; b.vx *= .992; b.rot += b.vr;
+    b.vy += g; b.x += b.vx; b.y += b.vy; b.vx *= .992; b.rot += b.vr;
     if (b.y > cv.height + 30) b.life = 0;
     if (b.life <= 0) continue;
     alive++;
@@ -2276,23 +2337,23 @@ INDEX_TEMPLATE = """<!doctype html>
 __THEME_CSS__
 __PAGE_CSS__
 .grid {
-  max-width: 1180px; margin: 0 auto; display: grid; gap: 18px;
-  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  max-width: 88rem; margin: 0 auto; display: grid; gap: 1.4rem;
+  grid-template-columns: repeat(auto-fill, minmax(25rem, 1fr));
 }
 .card {
   display: block; text-decoration: none; color: inherit; background: var(--surface-1);
-  border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 1rem; overflow: hidden;
   transition: transform .18s, border-color .18s, box-shadow .18s;
 }
-.card:hover { transform: translateY(-3px); border-color: var(--text-3); box-shadow: var(--shadow); }
-.card svg { display: block; width: 100%; height: 132px; background: var(--grass); }
+.card:hover { transform: translateY(-.2rem); border-color: var(--text-3); box-shadow: var(--shadow); }
+.card svg { display: block; width: 100%; height: 12rem; background: var(--grass); }
 .mini-asphalt { fill: none; stroke: var(--asphalt); stroke-width: 46; stroke-linejoin: round; }
 .mini-line { fill: none; stroke: var(--line); stroke-width: 3; stroke-dasharray: 16 20; opacity: .55; }
-.card-body { padding: 13px 15px 15px; }
-.card h2 { margin: 0 0 6px; font-size: 14.5px; font-weight: 650; }
-.card p { margin: 0; font-size: 13px; color: var(--text-2); }
-.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 5px; }
-.muted { color: var(--text-3); font-size: 12px; margin-top: 4px !important; }
+.card-body { padding: 1rem 1.2rem 1.2rem; }
+.card h2 { margin: 0 0 .45rem; font-size: 1.6rem; font-weight: 650; }
+.card p { margin: 0; font-size: 1.375rem; color: var(--text-2); }
+.dot { width: .8rem; height: .8rem; border-radius: 50%; display: inline-block; margin-right: .4rem; }
+.muted { color: var(--text-3); font-size: 1.25rem; margin-top: .3rem !important; }
 </style>
 </head>
 <body>
