@@ -40,10 +40,16 @@ wants third party packages (numpy, h5py, umap-learn); they are imported lazily
 and a missing one costs you the scatter, not the deck.
 
 Output is one self-contained HTML file per dataset (inline SVG + inline JS, no
-external assets), plus three pages tying them together: ``index.html`` (the
-circuits), ``paddock.html`` (every car, its colour and badge) and
-``standings.html`` (the championship, scored exactly like the Sherlock Holmes
-board in ``evaluator.py``).
+external assets), plus the pages tying them together: ``index.html`` (the
+circuits), ``paddock.html`` (every car, its colour and badge), and the standings
+-- ``standings.html`` listing the five championships, with one page each behind
+it (``standings-sherlock-holmes.html`` and friends).  The boards are declared in
+``BOARDS`` and scored the way ``evaluator.print_boards`` scores them; each has
+its own scenario, metric and recall bar, so all five are rendered whatever
+``--scenario`` is being raced, and ``--recall-threshold`` only moves the racing.
+Dory and Marie Kondo additionally apply the README's rule that a run must stay
+within twice the baseline's query time, which ``evaluator.py`` does not.
+The hub page names no winner on purpose: watch the races first.
 
     python animate.py
     python animate.py --pace-car
@@ -597,42 +603,158 @@ def build_roster(races: dict[str, list[TeamRun]], winners: dict[str, str | None]
                                  -(e["best_qps"] or 0.0), e["team"]))
 
 
-def championship(conn: sqlite3.Connection, scenario: str, threshold: float,
+# ---------------------------------------------------------------------------
+# Championships
+#
+# The competition is not one title but five, each scoring the same seven
+# circuits by a different measure.  They are declared once, here, and every
+# standings page is rendered from this table -- adding a sixth trophy is a row,
+# not a code path.  The first five mirror `evaluator.print_boards`, in its order.
+# ---------------------------------------------------------------------------
+
+# Columns of `runs` a board may be scored by.  `championship` interpolates the
+# metric straight into its SQL (there is no way to parameterise a column name),
+# so the name has to come from a closed set rather than from anything a caller
+# can invent -- this frozenset is what makes that f-string safe.
+METRIC_COLUMNS = frozenset({"qps", "peak_mem_mb", "build_time_s", "n_dist_queries"})
+
+# How a metric is named in prose, on the cards and in the page headers.
+METRIC_LABELS = {
+    "qps":            "queries per second",
+    "peak_mem_mb":    "peak memory",
+    "build_time_s":   "build time",
+    "n_dist_queries": "distance computations",
+}
+
+
+@dataclass(frozen=True)
+class Board:
+    """One championship: which runs are eligible, and what ranks them."""
+
+    title:    str                    # "Marie Kondo"
+    slug:     str                    # -> standings-marie-kondo.html
+    scenario: str
+    metric:   str                    # a column of `runs`, from METRIC_COLUMNS
+    descending: bool                 # True when a bigger number is better
+    threshold:  float                # minimum average recall to be eligible
+    unit:     str                    # rendered after the metric value
+    rule:     str                    # one line of prose for the card and header
+    # Cap on query time as a multiple of the faiss-hnsw baseline's on the same
+    # dataset.  README.md attaches it to the two prizes that would otherwise
+    # reward an index that is cheap to hold or to build and hopeless to search.
+    baseline_cap: float | None = None
+
+    @property
+    def file(self) -> str:
+        return f"standings-{self.slug}.html"
+
+
+BOARDS = [
+    Board("Sherlock Holmes", "sherlock-holmes", "high_recall", "qps", True, 0.95,
+          "qps", "The fastest approach that still finds what it was sent for."),
+    Board("Bianconiglio", "bianconiglio", "fast", "qps", True, 0.80,
+          "qps", "Always late, always running: the fastest approach at recall 0.8."),
+    Board("Dory", "dory", "memory", "peak_mem_mb", False, 0.95,
+          "MB", "The smallest memory footprint, without forgetting the neighbours.",
+          baseline_cap=2.0),
+    Board("Marie Kondo", "marie-kondo", "high_recall", "build_time_s", False, 0.95,
+          "s", "The quickest to tidy a dataset into an index.",
+          baseline_cap=2.0),
+    Board("Paperone", "paperone", "high_recall", "n_dist_queries", False, 0.95,
+          "dists", "The stingiest with full distance computations.",
+          baseline_cap=None),
+]
+
+
+def format_metric(board: Board, value: float | None) -> str:
+    """A board's metric as a short, readable string with its unit."""
+    if value is None:
+        return "&mdash;"
+    if board.metric == "n_dist_queries":
+        for cut, suffix in ((1e9, "G"), (1e6, "M"), (1e3, "k")):
+            if abs(value) >= cut:
+                # 256000 reads as 256k, not 256.0k -- the tenth is only there
+                # for the values that actually need it.
+                return f"{value / cut:.1f}".removesuffix(".0") + suffix
+        return f"{value:.0f}"
+    if board.metric == "build_time_s":
+        return f"{value:.1f} {board.unit}"
+    return f"{value:,.0f} {board.unit}".replace(",", "&thinsp;")
+
+
+def baseline_times(conn: sqlite3.Connection, scenario: str) -> dict[str, float]:
+    """Query time of the reference run per dataset, for the 2x eligibility cap."""
+    return {d: t for d, t in conn.execute(
+        "select dataset, total_query_time_s from runs "
+        "where scenario = ? and team_name = ? and status = 'success' "
+        "and total_query_time_s is not null",
+        (scenario, BASELINE_TEAM))}
+
+
+def championship(conn: sqlite3.Connection, board: Board,
                  datasets: set[str] | None = None) -> list[dict]:
-    """Season points per team, scored exactly like ``evaluator.print_boards``.
+    """Season points for one board, scored the way ``evaluator.print_boards`` does.
 
     Deliberately queries ``runs`` itself instead of scoring off the loaded grid:
     ``load_races`` drops the baseline rows up front unless ``--pace-car`` is on,
-    and scoring off that would quietly change which points slots get consumed,
-    letting this page disagree with ``evaluator.py leaderboard``.
+    and scoring off that would quietly change which points slots get consumed.
+
+    Two rules are easy to get subtly wrong, and both match evaluator.py: a run
+    that is not eligible consumes *no* points slot (the next eligible run takes
+    the one it would have had), while the baseline consumes the slot it earned
+    and scores nothing -- it is simply absent from the points dict.
+
+    The one deliberate departure is ``Board.baseline_cap``.  README.md makes the
+    Dory and Marie Kondo prizes conditional on a run staying within twice the
+    baseline's query time; ``evaluator.py leaderboard`` does not implement that,
+    so those two boards can legitimately disagree with the CLI.  The other three
+    carry no cap and must agree with it exactly.
     """
+    if board.metric not in METRIC_COLUMNS:      # see METRIC_COLUMNS
+        raise ValueError(f"not a scoreable column: {board.metric!r}")
+
     points = [10, 8, 6, 4, 3, 2, 1, 0, 0, 0, 0, 0]
     rows = conn.execute(
-        """
-        select dataset, team_name, qps, status, avg_recall
+        f"""
+        select dataset, team_name, {board.metric}, status, avg_recall,
+               total_query_time_s
         from runs where scenario = ?
-        order by dataset, qps desc
-        """, (scenario,)).fetchall()
+        order by dataset, {board.metric} {"desc" if board.descending else "asc"}
+        """, (board.scenario,)).fetchall()
 
-    teams = {t for _, t, _, _, _ in rows if t != BASELINE_TEAM}
-    board = {t: {"team": t, "points": 0, "per_dataset": {}} for t in teams}
+    caps: dict[str, float] = {}
+    if board.baseline_cap is not None:
+        caps = baseline_times(conn, board.scenario)
+        missing = {d for d, *_ in rows if d not in caps}
+        if datasets is not None:
+            missing &= datasets
+        for d in sorted(missing):
+            log.warning("%s: no %s run on %s -- the %gx query-time cap cannot be "
+                        "applied there", board.title, BASELINE_TEAM, d,
+                        board.baseline_cap)
+
+    teams = {r[1] for r in rows if r[1] != BASELINE_TEAM}
+    scored = {t: {"team": t, "points": 0, "per_dataset": {}} for t in teams}
     last_dataset, idx = None, 0
-    for dataset, team, qps, status, recall in rows:
+    for dataset, team, metric, status, recall, query_time in rows:
         if datasets is not None and dataset not in datasets:
             continue
         if dataset != last_dataset:
             last_dataset, idx = dataset, 0
-        if status != "success" or not qps or (recall or 0.0) < threshold:
+        # `not metric` also drops a NULL, which on an ascending board would
+        # otherwise sort to the front and walk off with pole.
+        if status != "success" or not metric or (recall or 0.0) < board.threshold:
             continue
-        # The baseline never scores, but it does take up the slot it earned --
-        # matching evaluator.py, where it is simply absent from the points dict.
-        if team in board:
+        if (board.baseline_cap is not None and dataset in caps
+                and (query_time or 0.0) > board.baseline_cap * caps[dataset]):
+            continue
+        if team in scored:
             got = points[idx] if idx < len(points) else 0
-            board[team]["points"] += got
-            board[team]["per_dataset"][dataset] = got
+            scored[team]["points"] += got
+            scored[team]["per_dataset"][dataset] = (got, metric)
         idx += 1
 
-    return sorted(board.values(), key=lambda e: (-e["points"], e["team"]))
+    return sorted(scored.values(), key=lambda e: (-e["points"], e["team"]))
 
 
 # ---------------------------------------------------------------------------
@@ -721,11 +843,29 @@ _PAGES = [("index.html", "Circuits"), ("paddock.html", "Paddock"),
 
 
 def nav_html(current: str) -> str:
+    """The top level nav, with the page you are on marked.
+
+    Every ``standings-*.html`` board lights the one Standings entry: the five
+    trophies are one destination up here, and are told apart in the sub-nav.
+    """
     links = []
     for href, label in _PAGES:
-        here = ' aria-current="page"' if href == current else ""
+        on = (current.startswith("standings") if href == "standings.html"
+              else href == current)
+        here = ' aria-current="page"' if on else ""
         links.append('<a href="' + href + '"' + here + '>' + label + '</a>')
     return '<nav aria-label="Pages">' + "".join(links) + "</nav>"
+
+
+def subnav_html(current: str) -> str:
+    """The trophy strip shown on the standings hub and on every board page."""
+    links = ['<a href="standings.html"'
+             + (' aria-current="page"' if current == "standings.html" else "")
+             + ">All five</a>"]
+    for b in BOARDS:
+        here = ' aria-current="page"' if b.file == current else ""
+        links.append(f'<a href="{b.file}"{here}>{b.title}</a>')
+    return '<nav class="sub" aria-label="Championships">' + "".join(links) + "</nav>"
 
 
 def dataset_codes(datasets: Iterable[str]) -> dict[str, str]:
@@ -783,9 +923,28 @@ def render_paddock(roster: list[dict], scenario: str) -> str:
     )
 
 
-def render_standings(board: list[dict], roster: list[dict], scenario: str,
-                     threshold: float, datasets: list[str], total: int) -> str:
+def board_look(roster: list[dict], teams: Iterable[str]) -> dict[str, dict]:
+    """Colour and badge per team, for every team that scores on *any* board.
+
+    The roster only knows the scenario that was raced, so a team that scored on
+    ``fast`` or ``memory`` but never made the rendered grid would otherwise show
+    up on its standings page as an anonymous grey row with an em dash for a
+    badge.  Those teams get a badge from the same allocator the cars use --
+    resolved over the union, so it cannot collide with a racer's -- and the
+    reserved "did not start" grey, which is exactly what they are.
+    """
     look = {e["team"]: e for e in roster}
+    missing = sorted(set(teams) - look.keys())
+    if missing:
+        tags = assign_tags(look.keys() | set(missing))
+        for team in missing:
+            look[team] = {"team": team, "tag": tags[team],
+                          "light": NEUTRAL_DNS[0], "dark": NEUTRAL_DNS[1]}
+    return look
+
+
+def render_standings(board: Board, scored: list[dict], look: dict[str, dict],
+                     datasets: list[str], total: int) -> str:
     codes = dataset_codes(datasets)
 
     def style(team: str) -> str:
@@ -796,9 +955,9 @@ def render_standings(board: list[dict], roster: list[dict], scenario: str,
 
     podium, order = [], [1, 0, 2]            # P2 on the left, P1 centre, P3 right
     for slot in order:
-        if slot >= len(board):
+        if slot >= len(scored):
             continue
-        e = board[slot]
+        e = scored[slot]
         tag = look.get(e["team"], {}).get("tag", "&mdash;")
         podium.append(
             f'<div class="step p{slot + 1}" style="{style(e["team"])}">'
@@ -812,15 +971,21 @@ def render_standings(board: list[dict], roster: list[dict], scenario: str,
 
     head = "".join(f'<th class="num" title="{d}">{codes[d]}</th>' for d in datasets)
     rows = []
-    for i, e in enumerate(board):
+    for i, e in enumerate(scored):
         tag = look.get(e["team"], {}).get("tag", "&mdash;")
-        cells = "".join(
-            f'<td class="num">{e["per_dataset"].get(d) or "&middot;"}</td>'
-            for d in datasets)
+        cells = []
+        for d in datasets:
+            got = e["per_dataset"].get(d)
+            if got is None:                  # not eligible on that circuit
+                cells.append('<td class="num"><span class="pts">&middot;</span></td>')
+                continue
+            pts, metric = got
+            cells.append(f'<td class="num"><span class="pts">{pts}</span>'
+                         f'<span class="met">{format_metric(board, metric)}</span></td>')
         rows.append(
             f'<tr style="{style(e["team"])}"><td class="num rank">{i + 1}</td>'
             f'<td><span class="swatch"></span><span class="badge sm">{tag}</span>'
-            f'{e["team"]}</td>{cells}'
+            f'{e["team"]}</td>{"".join(cells)}'
             f'<td class="num total">{e["points"]}</td></tr>'
         )
 
@@ -830,14 +995,61 @@ def render_standings(board: list[dict], roster: list[dict], scenario: str,
                f'circuits rendered.</p>')
     return (
         STANDINGS_TEMPLATE
-        .replace("__SCENARIO__", scenario)
-        .replace("__THRESHOLD__", f"{threshold:g}")
-        .replace("<!--__NAV__-->", nav_html("standings.html"))
+        .replace("__TITLE__", board.title)
+        .replace("__SCENARIO__", board.scenario)
+        .replace("__RULE__", board.rule)
+        .replace("__DIRECTION__", "highest" if board.descending else "lowest")
+        .replace("__METRIC__", METRIC_LABELS[board.metric])
+        .replace("__THRESHOLD__", f"{board.threshold:g}")
+        .replace("<!--__CAP__-->", cap_note(board))
+        .replace("<!--__NAV__-->", nav_html(board.file))
+        .replace("<!--__SUBNAV__-->", subnav_html(board.file))
         .replace("<!--__PODIUM__-->", "\n".join(podium))
         .replace("<!--__HEAD__-->", head)
         .replace("<!--__ROWS__-->", "\n".join(rows))
         .replace("<!--__LEGEND__-->", legend)
         .replace("<!--__PARTIAL__-->", partial)
+    )
+
+
+def cap_note(board: Board) -> str:
+    """The eligibility caveat for a board that carries a baseline query-time cap."""
+    if board.baseline_cap is None:
+        return ""
+    return (f'<p class="note">Eligibility also requires finishing the queries in '
+            f'no more than {board.baseline_cap:g}&times; the time the '
+            f'<code>{BASELINE_TEAM}</code> reference run took on the same '
+            f'circuit &mdash; a small index nobody can search is not a prize.</p>')
+
+
+def render_standings_hub(counts: dict[str, int], total: int) -> str:
+    """The Standings landing page: the five trophies, and not a hint of who won.
+
+    Deliberately says nothing about standings.  The whole deck is meant to be
+    watched before it is read, so this page names the contests and the rules and
+    lets the board pages do the reveal.
+    """
+    cards = []
+    for i, b in enumerate(BOARDS):
+        n = counts.get(b.slug, 0)
+        cards.append(
+            f'<a class="card" href="{b.file}">'
+            + _car_svg(104, f' style="animation-delay:-{i * 3.1:.1f}s"')
+            + f'<div class="card-body"><h2>{b.title}</h2>'
+            f'<p class="rule">{b.rule}</p>'
+            f'<p class="terms"><span class="chip">{b.scenario}</span>'
+            f'{"highest" if b.descending else "lowest"} '
+            f'{METRIC_LABELS[b.metric]} &middot; recall &ge; {b.threshold:g}'
+            + (f' &middot; &le;{b.baseline_cap:g}&times; baseline time'
+               if b.baseline_cap is not None else "")
+            + f'</p><p class="muted">{n} of {total} circuits scored</p>'
+            '</div></a>'
+        )
+    return (
+        HUB_TEMPLATE
+        .replace("<!--__NAV__-->", nav_html("standings.html"))
+        .replace("<!--__SUBNAV__-->", subnav_html("standings.html"))
+        .replace("<!--__CARDS__-->", "\n".join(cards))
     )
 
 
@@ -951,6 +1163,14 @@ nav a[aria-current="page"] {
   background: var(--surface-1); border-color: var(--border);
   color: var(--text-1); font-weight: 600;
 }
+/* The trophy strip under the header: the same pills one level quieter, and it
+   wraps onto a second line rather than pushing the header wide on a phone. */
+nav.sub { max-width: 1180px; margin: -14px auto 24px; flex-wrap: wrap; gap: 4px; }
+nav.sub a {
+  font-size: 12.5px; padding: 5px 11px; border-color: var(--border);
+  background: var(--surface-1);
+}
+nav.sub a[aria-current="page"] { background: var(--surface-2); }
 button.theme {
   font: inherit; font-size: 15px; line-height: 1; cursor: pointer; padding: 6px 9px;
   background: var(--surface-1); color: var(--text-2);
@@ -1063,7 +1283,7 @@ STANDINGS_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Championship &middot; __SCENARIO__</title>
+<title>__TITLE__ &middot; Championship</title>
 <style>
 __THEME_CSS__
 __PAGE_CSS__
@@ -1110,22 +1330,30 @@ tbody tr + tr td { border-top: 1px solid var(--border); }
   background: var(--car); margin-right: 8px; vertical-align: middle;
 }
 .badge.sm { margin-right: 8px; padding: 2px 6px; font-size: 10px; }
+/* Stacked cell: the points a run scored, and the measurement that earned them.
+   Scoped to the table -- .step .pts is the podium's own points line. */
+td .pts { display: block; }
+td .met { display: block; margin-top: 1px; font-size: 10.5px; color: var(--text-3); }
 .legend { max-width: 1180px; margin: 12px auto 0; color: var(--text-3); font-size: 12px; }
 .note { max-width: 1180px; margin: 0 auto 18px; color: var(--text-2); }
+.note code { font-size: 12px; }
 </style>
 </head>
 <body>
 <header class="page">
   <div>
-    <h1>Championship</h1>
-    <p>Points across every circuit of the <strong>__SCENARIO__</strong> scenario:
-       10-8-6-4-3-2-1 by queries per second, among runs that reached recall
+    <h1>__TITLE__</h1>
+    <p>__RULE__<br>
+       Points across every circuit of the <strong>__SCENARIO__</strong> scenario:
+       10-8-6-4-3-2-1 by __DIRECTION__ __METRIC__, among runs that reached recall
        __THRESHOLD__.</p>
   </div>
   <span class="spacer"></span>
   <!--__NAV__-->
   <button class="theme" title="Toggle light / dark">&#9681;</button>
 </header>
+<!--__SUBNAV__-->
+<!--__CAP__-->
 <!--__PARTIAL__-->
 <div class="podium">
 <!--__PODIUM__-->
@@ -1139,6 +1367,63 @@ tbody tr + tr td { border-top: 1px solid var(--border); }
   </table>
 </div>
 <p class="legend"><!--__LEGEND__--></p>
+<script>__THEME_JS__</script>
+</body>
+</html>
+""".replace("__THEME_CSS__", _THEME_CSS).replace("__PAGE_CSS__", _PAGE_CSS) \
+   .replace("__THEME_JS__", _THEME_JS)
+
+HUB_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Championships</title>
+<style>
+__THEME_CSS__
+__PAGE_CSS__
+.grid {
+  max-width: 1180px; margin: 0 auto; display: grid; gap: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(288px, 1fr));
+}
+.card {
+  display: flex; flex-direction: column; align-items: center; text-decoration: none;
+  color: inherit; background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 14px; padding: 16px 18px 18px;
+  transition: transform .18s, border-color .18s, box-shadow .18s;
+}
+.card:hover { transform: translateY(-3px); border-color: var(--text-3); box-shadow: var(--shadow); }
+/* Every trophy car is the neutral grey: a coloured one would give the game away
+   before the visitor has opened a single board. */
+.card { --car: var(--neutral); }
+.card .carart { display: block; margin: 4px 0 2px; }
+.card-body { text-align: center; width: 100%; }
+.card h2 { margin: 10px 0 6px; font-size: 16px; font-weight: 650; }
+.card .rule { margin: 0 0 10px; font-size: 13px; color: var(--text-2); }
+.card .terms { margin: 0; font-size: 12px; color: var(--text-3); }
+.chip {
+  display: inline-block; margin-right: 6px; padding: 2px 7px; border-radius: 6px;
+  background: var(--surface-2); color: var(--text-2); font-size: 11px;
+  font-weight: 600; letter-spacing: .02em;
+}
+.card .muted { margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<header class="page">
+  <div>
+    <h1>Championships</h1>
+    <p>Five titles over the same seven circuits, each scoring a different
+       virtue. Pick one &mdash; no spoilers on this page.</p>
+  </div>
+  <span class="spacer"></span>
+  <!--__NAV__-->
+  <button class="theme" title="Toggle light / dark">&#9681;</button>
+</header>
+<!--__SUBNAV__-->
+<div class="grid">
+<!--__CARDS__-->
+</div>
 <script>__THEME_JS__</script>
 </body>
 </html>
@@ -2049,7 +2334,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dataset", action="append", metavar="NAME",
                    help="only render this dataset (repeatable)")
     p.add_argument("--recall-threshold", type=float, default=DEFAULT_THRESHOLD,
-                   help="recall a run must reach to be eligible to win")
+                   help="recall a run must reach to be eligible to win the race "
+                        "on a circuit, and below which a car retires; the "
+                        "championship pages ignore it and use each trophy's own "
+                        "bar (default: %(default)s)")
     p.add_argument("--laps", type=int, default=DEFAULT_LAPS,
                    help="times round the circuit for a full run")
     p.add_argument("--duration", type=float, default=DEFAULT_DURATION,
@@ -2109,7 +2397,10 @@ def main() -> None:
             if not races:
                 raise SystemExit("none of the requested datasets can be raced")
 
-        board = championship(conn, args.scenario, args.recall_threshold, set(races))
+        # Every championship, not just the one that was raced: the boards carry
+        # their own scenario and recall bar, so `fast` and `memory` get scored
+        # here even when the circuits on screen are the `high_recall` ones.
+        boards = {b.slug: championship(conn, b, set(races)) for b in BOARDS}
     finally:
         conn.close()
 
@@ -2148,16 +2439,29 @@ def main() -> None:
     roster = build_roster(races, winners)
     (out / "paddock.html").write_text(
         render_paddock(roster, args.scenario), encoding="utf-8")
+    log.info("paddock: %d cars (%d never started)",
+             len(roster), sum(1 for e in roster if not e["starts"]))
+
+    look = board_look(roster, {e["team"] for b in boards.values() for e in b})
+    circuits = sorted(races)
+    counts = {}
+    for b in BOARDS:
+        scored = boards[b.slug]
+        counts[b.slug] = len({d for e in scored for d in e["per_dataset"]})
+        (out / b.file).write_text(
+            render_standings(b, scored, look, circuits, season), encoding="utf-8")
+        # Deliberately no leader in this line: the terminal should not spoil the
+        # hub page, which goes to the same lengths to stay quiet.
+        log.info("%-16s %d of %d circuits scored, %d teams on the board",
+                 b.title, counts[b.slug], len(circuits),
+                 sum(1 for e in scored if e["points"]))
     (out / "standings.html").write_text(
-        render_standings(board, roster, args.scenario, args.recall_threshold,
-                         sorted(races), season), encoding="utf-8")
-    log.info("paddock: %d cars (%d never started)  championship leader: %s",
-             len(roster), sum(1 for e in roster if not e["starts"]),
-             f'{board[0]["team"]} on {board[0]["points"]} pts' if board else "--")
+        render_standings_hub(counts, len(circuits)), encoding="utf-8")
 
     index = out / "index.html"
     index.write_text(render_index(entries, args.scenario), encoding="utf-8")
-    log.info("wrote %d races + index, paddock and standings to %s/", len(entries), out)
+    log.info("wrote %d races + index, paddock and %d standings pages to %s/",
+             len(entries), len(BOARDS) + 1, out)
 
     if args.open:
         webbrowser.open(index.resolve().as_uri())
