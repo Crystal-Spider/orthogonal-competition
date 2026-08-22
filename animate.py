@@ -1695,21 +1695,6 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   70%  { opacity: .92; }
   100% { opacity: 0; transform: translateX(105%) skewX(-12deg); }
 }
-#winner {
-  position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%) scale(.85);
-  background: var(--surface-1); border: 1px solid var(--border); border-radius: 1.1rem;
-  box-shadow: var(--shadow); padding: 1.6rem 2.1rem; text-align: center;
-  opacity: 0; pointer-events: none; transition: opacity .35s, transform .35s cubic-bezier(.22,1,.36,1);
-  min-width: 24rem; max-width: 90%;
-}
-#winner.on { opacity: 1; transform: translate(-50%,-50%) scale(1); }
-#winner .trophy { font-size: 4.25rem; line-height: 1; }
-#winner .name { font-size: 2.75rem; font-weight: 700; margin: .45rem 0 .15rem; letter-spacing: -.01em; }
-#winner .sub { color: var(--text-2); font-size: 1.5rem; }
-#winner .stats { display: flex; gap: 1.6rem; justify-content: center; margin-top: 1.1rem; }
-#winner .stats div { text-align: center; }
-#winner .stats .k { font-size: 1.05rem; text-transform: uppercase; letter-spacing: .07em; color: var(--text-3); }
-#winner .stats .v { font-size: 2rem; font-weight: 650; font-variant-numeric: tabular-nums; }
 #toast {
   position: absolute; left: 50%; bottom: 1.8rem; transform: translateX(-50%) translateY(.6rem);
   background: var(--surface-1); border: 1px solid var(--border); border-radius: .8rem;
@@ -1806,7 +1791,6 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
     </svg>
     <canvas id="confetti"></canvas>
     <div id="sweep"></div>
-    <div id="winner" role="status" aria-live="polite"></div>
     <div id="toast" role="status" aria-live="polite"></div>
     <div id="lights" role="status" aria-live="assertive">
       <div id="gantry"><i></i><i></i><i></i><i></i><i></i></div>
@@ -2267,20 +2251,6 @@ function celebrate(w, order) {
 
   const second = order.find(t => t !== w && t.qualified);
   const margin = second ? (second.cum[second.cum.length - 1] - w.cum[w.cum.length - 1]) : null;
-  const card = document.getElementById("winner");
-  card.innerHTML =
-    '<div class="trophy">\\ud83c\\udfc6</div>' +
-    '<div class="name" style="color:' + colorOf(w) + '">' + w.team + '</div>' +
-    '<div class="sub">' + (RACE.solo ? "time trial" : "wins at " + RACE.dataset) + '</div>' +
-    '<div class="stats">' +
-      '<div><div class="k">qps</div><div class="v">' + w.qps.toFixed(1) + '</div></div>' +
-      '<div><div class="k">recall</div><div class="v">' + w.recall.toFixed(4) + '</div></div>' +
-      '<div><div class="k">time</div><div class="v">' + w.cum[w.cum.length - 1].toFixed(3) + 's</div></div>' +
-      (margin != null ? '<div><div class="k">margin</div><div class="v">+' +
-        margin.toFixed(3) + 's</div></div>' : '') +
-    '</div>';
-  card.classList.add("on");
-  setTimeout(() => card.classList.remove("on"), 5200);
 
   w._g.animate(
     [{ transform: "scale(1)" }, { transform: "scale(1.45)" }, { transform: "scale(1)" }],
@@ -2340,7 +2310,6 @@ playBtn.onclick = () => {
 document.getElementById("replay").onclick = () => {
   simT = 0; rearm(); armCountdown(); playing = true; setPlay();
   bits = []; ctx.clearRect(0, 0, cv.width, cv.height);
-  document.getElementById("winner").classList.remove("on");
   document.getElementById("toast").classList.remove("on");
 };
 const speeds = document.getElementById("speeds");
