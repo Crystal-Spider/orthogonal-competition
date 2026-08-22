@@ -670,7 +670,7 @@ BOARDS = [
           baseline_cap=2.0),
     Board("Paperone", "paperone", "high_recall", "n_dist_queries", False, 0.95,
           "dists", "The stingiest with full distance computations.",
-          baseline_cap=None),
+          baseline_cap=2.0),
 ]
 
 
@@ -751,7 +751,7 @@ def championship(conn: sqlite3.Connection, board: Board,
             last_dataset, idx = dataset, 0
         # `not metric` also drops a NULL, which on an ascending board would
         # otherwise sort to the front and walk off with pole.
-        if status != "success" or not metric or (recall or 0.0) < board.threshold:
+        if status != "success" or (recall or 0.0) < board.threshold:
             continue
         if (board.baseline_cap is not None and dataset in caps
                 and (query_time or 0.0) > board.baseline_cap * caps[dataset]):
