@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -712,11 +713,18 @@ def championship(conn: sqlite3.Connection, board: Board,
     the one it would have had), while the baseline consumes the slot it earned
     and scores nothing -- it is simply absent from the points dict.
 
-    The one deliberate departure is ``Board.baseline_cap``.  README.md makes the
-    Dory and Marie Kondo prizes conditional on a run staying within twice the
-    baseline's query time; ``evaluator.py leaderboard`` does not implement that,
-    so those two boards can legitimately disagree with the CLI.  The other three
-    carry no cap and must agree with it exactly.
+    A third rule is this file's own: runs that tie on the metric all score the
+    slot the first of them landed on, and the tie consumes one slot per run, so
+    a two-way tie for pole reads 10, 10, 6.  The Paperone board needs it -- an
+    approach that computes no distances at all cannot be said to have beaten
+    another that also computed none -- but it applies to every board.
+
+    Three deliberate departures from ``evaluator.py leaderboard``, then: ties,
+    ``Board.baseline_cap`` (README.md makes Dory, Marie Kondo and Paperone
+    conditional on a run staying within twice the baseline's query time, which
+    the CLI does not implement), and zero: the CLI still drops a run whose
+    metric is 0.0, which is exactly the Paperone result this board rewards.
+    Only Sherlock Holmes and Bianconiglio must still agree with it exactly.
     """
     if board.metric not in METRIC_COLUMNS:      # see METRIC_COLUMNS
         raise ValueError(f"not a scoreable column: {board.metric!r}")
@@ -743,26 +751,51 @@ def championship(conn: sqlite3.Connection, board: Board,
 
     teams = {r[1] for r in rows if r[1] != BASELINE_TEAM}
     scored = {t: {"team": t, "points": 0, "per_dataset": {}} for t in teams}
-    last_dataset, idx = None, 0
+    # `idx` is the slot the next eligible run consumes; `slot` is the one the
+    # current run scores, which lags behind it for the second and later run of a
+    # tie.  `last_metric` is what tells them apart -- a sentinel, not None, since
+    # None is a metric value the rows can legitimately carry.
+    unmeasured = object()
+    last_dataset, idx, slot, last_metric = None, 0, 0, unmeasured
     for dataset, team, metric, status, recall, query_time in rows:
         if datasets is not None and dataset not in datasets:
             continue
         if dataset != last_dataset:
-            last_dataset, idx = dataset, 0
-        # `not metric` also drops a NULL, which on an ascending board would
-        # otherwise sort to the front and walk off with pole.
-        if status != "success" or (recall or 0.0) < board.threshold:
+            last_dataset, idx, last_metric = dataset, 0, unmeasured
+        # A NULL metric is a run that was never measured, not a run that scored
+        # zero: on an ascending board it would otherwise sort to the front and
+        # walk off with pole.  (A real 0 is eligible -- see the docstring.)
+        if (status != "success" or metric is None
+                or (recall or 0.0) < board.threshold):
             continue
         if (board.baseline_cap is not None and dataset in caps
                 and (query_time or 0.0) > board.baseline_cap * caps[dataset]):
             continue
+        if metric != last_metric:
+            slot, last_metric = idx, metric
         if team in scored:
-            got = points[idx] if idx < len(points) else 0
+            got = points[slot] if slot < len(points) else 0
             scored[team]["points"] += got
             scored[team]["per_dataset"][dataset] = (got, metric)
         idx += 1
 
     return sorted(scored.values(), key=lambda e: (-e["points"], e["team"]))
+
+
+def rank_groups(scored: list[dict]) -> list[tuple[int, list[dict]]]:
+    """Season standings grouped by equal points, with competition ranks.
+
+    Two teams level on points share a rank and the next team takes the one
+    after both of them -- 1, 1, 3 -- the same way the per-circuit points slots
+    are consumed.  The podium and the table both count off this, so they cannot
+    disagree about who is a champion.
+    """
+    groups, rank = [], 1
+    for _, entries in itertools.groupby(scored, key=lambda e: e["points"]):
+        entries = list(entries)
+        groups.append((rank, entries))
+        rank += len(entries)
+    return groups
 
 
 # ---------------------------------------------------------------------------
@@ -964,25 +997,40 @@ def render_standings(board: Board, scored: list[dict], look: dict[str, dict],
             return "--car-l:var(--dns);--car-d:var(--dns)"
         return f'--car-l:{e["light"]};--car-d:{e["dark"]}'
 
-    podium, order = [], [1, 0, 2]            # P2 on the left, P1 centre, P3 right
-    for slot in order:
-        if slot >= len(scored):
+    # One step per group of teams level on points, so a shared title is a step
+    # with two cars on it rather than a car that has to be left off.  The three
+    # steps are the three competition *ranks*, not the top three teams: a
+    # two-way tie for the title fills P1 twice and leaves P2 empty, because the
+    # team behind them finished third and gets the P3 block it earned.
+    standing = rank_groups(scored)
+    groups = {rank: entries for rank, entries in standing if rank <= 3}
+    podium = []
+    for rank in (2, 1, 3):                   # P2 on the left, P1 centre, P3 right
+        entries = groups.get(rank)           # a tie for the title leaves no P2
+        if entries is None:
             continue
-        e = scored[slot]
-        tag = look.get(e["team"], {}).get("tag", "&mdash;")
+        who = []
+        for e in entries:
+            tag = look.get(e["team"], {}).get("tag", "&mdash;")
+            who.append(
+                f'<div class="who" style="{style(e["team"])}">'
+                f'<div class="crown">{"&#127942;" if rank == 1 else ""}</div>'
+                + _car_svg(6.5, spin=False)  # the podium is parc fermé, not a spin
+                + f'<div class="badge">{tag}</div><div class="name">{e["team"]}</div>'
+                f'<div class="pts">{e["points"]} pts</div></div>'
+            )
         podium.append(
-            f'<div class="step p{slot + 1}" style="{style(e["team"])}">'
-            f'<div class="who"><div class="crown">'
-            f'{"&#127942;" if slot == 0 else ""}</div>'
-            + _car_svg(6.5, spin=False)     # the podium is parc fermé, not a spin
-            + f'<div class="badge">{tag}</div><div class="name">{e["team"]}</div>'
-            f'<div class="pts">{e["points"]} pts</div></div>'
-            f'<div class="block">{slot + 1}</div></div>'
+            f'<div class="step p{rank}" style="--n:{len(entries)}">'
+            f'<div class="cars">{"".join(who)}</div>'
+            f'<div class="block">{rank}</div></div>'
         )
 
+    # Teams level on points share the # column too -- 1, 1, 3 -- so the table
+    # never quietly promotes one of two champions above the other.
+    ranks = {e["team"]: rank for rank, entries in standing for e in entries}
     head = "".join(f'<th class="num" title="{d}">{codes[d]}</th>' for d in datasets)
     rows = []
-    for i, e in enumerate(scored):
+    for e in scored:
         tag = look.get(e["team"], {}).get("tag", "&mdash;")
         cells = []
         for d in datasets:
@@ -994,7 +1042,8 @@ def render_standings(board: Board, scored: list[dict], look: dict[str, dict],
             cells.append(f'<td class="num"><span class="pts">{pts}</span>'
                          f'<span class="met">{format_metric(board, metric)}</span></td>')
         rows.append(
-            f'<tr style="{style(e["team"])}"><td class="num rank">{i + 1}</td>'
+            f'<tr style="{style(e["team"])}">'
+            f'<td class="num rank">{ranks[e["team"]]}</td>'
             f'<td><span class="swatch"></span><span class="badge sm">{tag}</span>'
             f'{e["team"]}</td>{"".join(cells)}'
             f'<td class="num total">{e["points"]}</td></tr>'
@@ -1314,8 +1363,22 @@ __PAGE_CSS__
   display: flex; align-items: flex-end; justify-content: center; gap: 1.1rem;
   margin: .6rem auto 2.6rem; max-width: 60rem; flex-wrap: wrap;
 }
-.step { flex: 1 1 15rem; max-width: 19rem; text-align: center; }
-.step .who { padding-bottom: .8rem; }
+/* A step is as wide as the number of cars standing on it: --n is the size of
+   the group of teams level on points that share this rank. */
+.step {
+  flex: 1 1 calc(15rem * var(--n, 1)); max-width: calc(19rem * var(--n, 1));
+  text-align: center;
+}
+.step .cars { display: flex; justify-content: center; gap: 1.1rem; }
+/* Column + `margin-top: auto` on the points line, so two cars sharing a step
+   keep their points on the same line however many rows their names take. */
+.step .who {
+  flex: 1 1 0; min-width: 0; padding-bottom: .8rem;
+  display: flex; flex-direction: column;
+}
+/* The badge is the one child of that column that must not stretch to the full
+   width of the step -- it is a pill, not a banner. */
+.step .badge { align-self: center; }
 .step .carart { display: block; margin: 0 auto .15rem; }
 /* The crown row and the two-line name slot are reserved on every step, so the
    three cars line up by podium height instead of by how long a team name is. */
@@ -1324,7 +1387,10 @@ __PAGE_CSS__
   font-size: 1.5rem; font-weight: 650; margin-top: .45rem; overflow-wrap: anywhere;
   min-height: 2.6em;
 }
-.step .pts { font-size: 1.375rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.step .pts {
+  margin-top: auto; font-size: 1.375rem; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
 .step .block {
   border: 1px solid var(--border); border-bottom: 0; border-radius: .8rem .8rem 0 0;
   background: var(--surface-1); color: var(--text-3);
