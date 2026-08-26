@@ -621,16 +621,22 @@ def build_roster(races: dict[str, list[TeamRun]], winners: dict[str, str | None]
 # not a code path.  The first five mirror `evaluator.print_boards`, in its order.
 # ---------------------------------------------------------------------------
 
-# Columns of `runs` a board may be scored by.  `championship` interpolates the
-# metric straight into its SQL (there is no way to parameterise a column name),
-# so the name has to come from a closed set rather than from anything a caller
-# can invent -- this frozenset is what makes that f-string safe.
-METRIC_COLUMNS = frozenset({"qps", "peak_mem_mb", "build_time_s", "n_dist_queries"})
+# What a board may be scored by: a column of `runs`, or an expression over its
+# columns.  `championship` interpolates the metric straight into its SQL (there
+# is no way to parameterise a column name), so it has to come from a closed set
+# rather than from anything a caller can invent -- this frozenset is what makes
+# that f-string safe.
+#
+# Dory scores what a run held in memory wherever it held it, RAM and GPU
+# together; `peak_vram_mb` is NULL rather than 0 for a run that never touched a
+# GPU, so it is coalesced before it can annul the sum.
+DORY_MEMORY = "peak_mem_mb + coalesce(peak_vram_mb, 0)"
+METRIC_COLUMNS = frozenset({"qps", DORY_MEMORY, "build_time_s", "n_dist_queries"})
 
 # How a metric is named in prose, on the cards and in the page headers.
 METRIC_LABELS = {
     "qps":            "queries per second",
-    "peak_mem_mb":    "peak memory",
+    DORY_MEMORY:      "peak memory (RAM + VRAM)",
     "build_time_s":   "build time",
     "n_dist_queries": "distance computations",
 }
@@ -643,7 +649,7 @@ class Board:
     title:    str                    # "Marie Kondo"
     slug:     str                    # -> standings-marie-kondo.html
     scenario: str
-    metric:   str                    # a column of `runs`, from METRIC_COLUMNS
+    metric:   str                    # SQL over `runs`, from METRIC_COLUMNS
     descending: bool                 # True when a bigger number is better
     threshold:  float                # minimum average recall to be eligible
     unit:     str                    # rendered after the metric value
@@ -663,8 +669,9 @@ BOARDS = [
           "qps", "The fastest approach that still finds what it was sent for."),
     Board("Bianconiglio", "bianconiglio", "fast", "qps", True, 0.80,
           "qps", "Always late, always running: the fastest approach at recall 0.8."),
-    Board("Dory", "dory", "memory", "peak_mem_mb", False, 0.95,
-          "MB", "The smallest memory footprint, without forgetting the neighbours.",
+    Board("Dory", "dory", "memory", DORY_MEMORY, False, 0.95,
+          "MB", "The smallest memory footprint, RAM and VRAM together, without "
+          "forgetting the neighbours.",
           baseline_cap=2.0),
     Board("Marie Kondo", "marie-kondo", "high_recall", "build_time_s", False, 0.95,
           "s", "The quickest to tidy a dataset into an index.",
@@ -719,15 +726,16 @@ def championship(conn: sqlite3.Connection, board: Board,
     approach that computes no distances at all cannot be said to have beaten
     another that also computed none -- but it applies to every board.
 
-    Three deliberate departures from ``evaluator.py leaderboard``, then: ties,
+    Four deliberate departures from ``evaluator.py leaderboard``, then: ties,
     ``Board.baseline_cap`` (README.md makes Dory, Marie Kondo and Paperone
     conditional on a run staying within twice the baseline's query time, which
-    the CLI does not implement), and zero: the CLI still drops a run whose
-    metric is 0.0, which is exactly the Paperone result this board rewards.
+    the CLI does not implement), zero -- the CLI still drops a run whose metric
+    is 0.0, which is exactly the Paperone result this board rewards -- and
+    Dory's metric, which is RAM plus VRAM here and RAM alone in the CLI.
     Only Sherlock Holmes and Bianconiglio must still agree with it exactly.
     """
     if board.metric not in METRIC_COLUMNS:      # see METRIC_COLUMNS
-        raise ValueError(f"not a scoreable column: {board.metric!r}")
+        raise ValueError(f"not a scoreable metric: {board.metric!r}")
 
     points = [10, 8, 6, 4, 3, 2, 1, 0, 0, 0, 0, 0]
     rows = conn.execute(
