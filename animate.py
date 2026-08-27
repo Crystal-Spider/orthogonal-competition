@@ -125,12 +125,26 @@ INDEX_DOTS  = 600               # dots kept for the (much smaller) index thumbna
 #   light: CVD dE 9.4 (deutan), normal-vision dE 17.7   -- all pairs, surface #fcfcfb
 #   dark : CVD dE 9.5 (deutan), normal-vision dE 17.8   -- all pairs, surface #1a1a19
 #
+# Those are the six-slot figures and they still hold for light: the 7th hue
+# (yellow) was fitted against the frozen six rather than re-stepping them, and
+# clears both light gates with room to spare -- CVD dE 10.6 and normal-vision
+# dE 20.5 against its nearest neighbour -- so the worst light pair is still
+# green/red at 9.4.
+#
+# The dark 7th slot is the exception, and is deliberately unvalidated: at seven
+# slots the dark lightness band (L 0.48-0.67) is too narrow to seat an all-pairs
+# set -- a full re-step of all seven dark steps still lands at CVD dE 6.6 and
+# normal-vision dE 12.4, a hard fail.  Since the pages are only ever shown in
+# the light theme, dark keeps its validated six and the yellow is the best
+# step available there (CVD dE 5.3 against dark red).  Anyone reviving the
+# dark theme for 7+ teams must cut a slot or facet, not nudge this value.
+#
 # A few slots sit below 3:1 against the surface, which obliges the relief rule:
 # every car carries a permanent name tag, and the standings table view spells
 # out identity in text.  Both are always on -- colour is never the only cue.
 #
 # Slots are assigned in this fixed order to teams sorted by name, so a team
-# keeps its colour across every circuit.  Never cycle or generate a 7th hue:
+# keeps its colour across every circuit.  Never cycle or generate an 8th hue:
 # overflow teams fall back to the neutral, and the run is logged.
 TEAM_COLORS = [
     ("blue",    "#5199f5", "#3490fe"),
@@ -139,6 +153,7 @@ TEAM_COLORS = [
     ("violet",  "#5f58b7", "#5d58a9"),
     ("green",   "#259121", "#33ac2e"),
     ("magenta", "#a83768", "#c47591"),
+    ("yellow",  "#e8a127", "#a97202"),   # light validated; dark best-effort only
 ]
 NEUTRAL      = ("#6b6a66", "#9b9a92")   # pace car / overflow
 NEUTRAL_DNS  = ("#8f8e88", "#6f6e68")   # never made it to the grid
