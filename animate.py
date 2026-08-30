@@ -1618,6 +1618,9 @@ main { flex: 1; display: flex; min-height: 0; }
   fill: var(--text-1); paint-order: stroke; stroke: var(--surface-1); stroke-width: 5;
   stroke-linejoin: round;
 }
+/* fill-box, not view-box: the winner's pulse scales about the car's own centre.
+   With view-box it would scale about the track's viewBox corner instead. */
+.car .pulse { transform-box: fill-box; transform-origin: 50% 50%; }
 .car.dnf .body, .car.dnf .wing { opacity: .55; stroke-dasharray: 3 2.5; }
 .car.done .tag { fill: var(--text-1); }
 
@@ -1930,6 +1933,12 @@ racers.forEach((t, i) => {
   // that is short of the target yet never provably doomed (which the maths
   // rules out, but the data could still contradict) wears it from the start.
   g.setAttribute("class", "car" + (t.qualified || t.out_index != null ? "" : " dnf"));
+  // The celebration scales this group, and only this one.  frame() owns _g's
+  // transform *attribute*, and a CSS transform on the same element -- which is
+  // what a WAAPI effect animates -- outranks it, so pulsing _g would drop the
+  // car's translate and park it on the viewBox corner for the whole animation.
+  const pulse = document.createElementNS(SVGNS, "g");
+  pulse.setAttribute("class", "pulse");
   const rot = document.createElementNS(SVGNS, "g");
   rot.innerHTML = '__CAR_SVG__';
   const tag = document.createElementNS(SVGNS, "text");
@@ -1941,9 +1950,11 @@ racers.forEach((t, i) => {
   const out = document.createElementNS(SVGNS, "text");
   out.setAttribute("class", "outmark"); out.setAttribute("y", 28);
   out.textContent = "OUT";
-  g.appendChild(rot); g.appendChild(tag); g.appendChild(out);
+  pulse.appendChild(rot);
+  g.appendChild(pulse); g.appendChild(tag); g.appendChild(out);
   carsG.appendChild(g);
-  t._g = g; t._rot = rot; t._tag = tag; t._lane = i - (racers.length - 1) / 2;
+  t._g = g; t._pulse = pulse; t._rot = rot; t._tag = tag;
+  t._lane = i - (racers.length - 1) / 2;
   // Starting grid slot: two columns, staggered back from the line, in the
   // payload's own order (fastest run first) -- a pretend qualifying result.
   t._row2 = Math.floor(i / 2); t._slot = (i % 2) ? .5 : -.5;
@@ -2275,7 +2286,7 @@ function celebrate(w, order) {
   const second = order.find(t => t !== w && t.qualified);
   const margin = second ? (second.cum[second.cum.length - 1] - w.cum[w.cum.length - 1]) : null;
 
-  w._g.animate(
+  w._pulse.animate(
     [{ transform: "scale(1)" }, { transform: "scale(1.45)" }, { transform: "scale(1)" }],
     { duration: 700, iterations: 3, easing: "ease-in-out" }
   );

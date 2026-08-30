@@ -1,0 +1,12 @@
+<svg class="carart" style="width:12.5rem;height:12.5rem" viewBox="-23 -23 46 46" aria-hidden="true">
+  <g class="spin" style="animation-delay:-0.0s">
+    <rect class="wheel" x="6.5" y="4.5" width="7.5" height="5" rx="1.6"></rect>
+    <rect class="wheel" x="-12" y="-9.5" width="8" height="5" rx="1.6"></rect>
+    <rect class="wheel" x="6.5" y="-9.5" width="7.5" height="5" rx="1.6"></rect>
+    <rect class="wheel" x="-12" y="4.5" width="8" height="5" rx="1.6"></rect>
+    <rect class="wing" x="14" y="-7" width="4" height="14" rx="1.5" fill="#259121"></rect>
+    <rect class="wing" x="-19" y="-7.5" width="4.5" height="15" rx="1.5" fill="#259121"></rect>
+    <path class="body" stroke="#ffffff" stroke-width="2" d="M 17,0 L 10,-3.2 L 2,-4.4 L -4,-5.4 L -13,-5.4 L -15,-3 L -15,3 L -13,5.4 L -4,5.4 L 2,4.4 L 10,3.2 Z" fill="#259121"></path>
+    <ellipse class="cockpit" cx="-2" cy="0" rx="3.6" ry="2.6"></ellipse>
+  </g>
+</svg>
