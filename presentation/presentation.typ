@@ -53,6 +53,7 @@
 
   #line(length: 100%)
 
+  - $k=100$
   - 7 datasets
     - dimensions 384 - 3072
     - size 200k - 1.4M
@@ -67,33 +68,53 @@
 
   #v(1em)
 
-  #set list(spacing: 1.5em)
-  - *Sherlock Holmes*: fastest getting average recall $gt.eq 0.95$
-  - *Bianconiglio*: fastest getting average recall $gt.eq 0.8$
-  - *Dory*: approach using the least amount of memory with recall $gt.eq 0.95$
-  - *Marie Kondo*: fastest at building the index
-  - *Paperone*: the one using the fewest distance computations
+  // #set list(spacing: 1.5em)
+  / *Sherlock Holmes*: \
+    fastest getting average recall $gt.eq 0.95$
+  / *Bianconiglio*: \ fastest getting average recall $gt.eq 0.8$
+  / *Dory*: \ approach using the least amount of memory with recall $gt.eq 0.95$
+  / *Marie Kondo*: \ fastest at building the index
+  / *Paperone*: \ the one using the fewest distance computations
 
+  #place(top + right, rect(inset: .5em, radius: .4em)[
+    #set text(.8em)
+    #set align(left)
+    #stack(dir: ttb,
+      spacing: .8em,
+      [1st - 10pts],
+      [2nd - 8pts],
+      [3rd - 6pts],
+      [4th - 4pts],
+      [5th - 3pts],
+      [6th - 2ts],
+      [7th - 1pts],
+    )
+  ])
 ]
 
+
+// Graph based
+
+
 #team(
-  [Friendly Neighborhood Solvers],
+  [Neighbors grass],
   [
-    - Hierarchical k-means + quantization
-    - CPU+GPU (CUDA)
+    - Build HNSW graph on exact vectors
+    - Keep only RaBitQ quantized vectors for queries
+    - Never compute a full distance    
+    - CPU with AVX512
     - C++
   ],
-  "carart/friendly-neighborhood-solvers.svg",
-  "imgs/chimisso-riccardo-circle.png",
-  "imgs/mingardi-federico-circle.png",
-  "imgs/montagnani-giulia-circle.png",
-  "imgs/gambirasio-noemi-circle.png"
+  "carart/neighbors-grass.svg",
+  "imgs/giordani-francesco-circle.png",
+  "imgs/moschetti-dario-circle.png",
+  "imgs/tarantelli-kristjan-circle.png"
 )
 
 #team(
   [Close Enough],
   [
-    - HNSW + RaBitQ
+    - Build HNSW graph on compressed RaBitQ vectors
     - Tunes `ef` at build time, based on calibration queries
     - Exact reranking
     - CPU with AVX-512 instructions
@@ -108,7 +129,7 @@
 #team(
   [Kinda-neighbors],
   [
-    - HNSW with 8-bit scalar quantization
+    - Build HNSW graph on 8-bit quantized vectors
     - Never computes a full distance
     - Adds a `patience` parameter at the base HNSW layer
     - Rust
@@ -119,6 +140,42 @@
   "imgs/visona-francesco-circle.png",
   "imgs/moretti-simone-circle.png"
 )
+
+
+// Partition based/codes
+
+#team(
+  [Friendly Neighborhood Solvers],
+  [
+    - Hierarchical k-means + quantization
+    - CPU for ruting down the tree of clustering
+    - GPU for scoring vector codes
+    - C++
+  ],
+  "carart/friendly-neighborhood-solvers.svg",
+  "imgs/chimisso-riccardo-circle.png",
+  "imgs/mingardi-federico-circle.png",
+  "imgs/montagnani-giulia-circle.png",
+  "imgs/gambirasio-noemi-circle.png"
+)
+
+#team(
+  [Finding NNemo],
+  [
+    - IVF + SAQ quantization (SIGMOD26)
+    - No exact reranking
+    - Fucus on minimizing memory footprint
+    - CPU
+    - C++
+  ],
+  "carart/finding-nnemo.svg",
+  "imgs/coviello-antonella-circle.png",
+  "imgs/beraldo-giulia-circle.png",
+  "imgs/marchesini-mattia-circle.png",
+  "imgs/zanon-stefano-circle.png"
+)
+
+// Pick your own
 
 #team(
   [ANNarchy],
@@ -135,25 +192,11 @@
 )
 
 #team(
-  [Neighbors grass],
-  [
-    - HNSW + RaBitQ
-    - Never compute a full distance    
-    - CPU with AVX512
-    - C++
-  ],
-  "carart/neighbors-grass.svg",
-  "imgs/giordani-francesco-circle.png",
-  "imgs/moschetti-dario-circle.png",
-  "imgs/tarantelli-kristjan-circle.png"
-)
-
-#team(
   [ANNVedi],
   [
-    - Brute force over quantized representation (or HNSW as a fallback)
+    - GPU: Brute force over 8-bit quantized representation
+    - CPU: HNSW as a fallback for some datasets
     - Verify only a limited number of candidates
-    - GPU (CUDA)
     - C++
   ],
   "carart/annvedi.svg",
@@ -162,19 +205,19 @@
   "imgs/di-gennaro-veronica-circle.png"
 )
 
-#team(
-  [Finding NNemo],
-  [
-    - IVF + SAQ quantization (SIGMOD26)
-    - No exact reranking
-    - CPU
-    - C++
-  ],
-  "carart/finding-nnemo.svg",
-  "imgs/coviello-antonella-circle.png",
-  "imgs/beraldo-giulia-circle.png",
-  "imgs/marchesini-mattia-circle.png",
-  "imgs/zanon-stefano-circle.png"
-)
 
+#slide[
+#set page(fill: rgb("#F2F1EC"))
+  #set text(size: 2em)
+  #set align(center + horizon)
+  #link("http://localhost:8000/paddock.html", image(height: 100%, "circuits.png"))
+]
+
+#slide[
+  = Conclusions
+  
+  - Quantization matters, a lot!
+  - You can trust quantizer-estimated distances
+  - GPU is viable even in a query-at-a-time scenario
+]
 

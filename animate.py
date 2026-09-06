@@ -757,7 +757,7 @@ def championship(conn: sqlite3.Connection, board: Board,
         f"""
         select dataset, team_name, {board.metric}, status, avg_recall,
                total_query_time_s
-        from runs where scenario = ?
+        from runs where scenario = ? and team_name not like 'faiss%'
         order by dataset, {board.metric} {"desc" if board.descending else "asc"}
         """, (board.scenario,)).fetchall()
 
