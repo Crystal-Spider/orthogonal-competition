@@ -39,9 +39,11 @@ and seed, so only the first build pays for them.  This is the one feature that
 wants third party packages (numpy, h5py, umap-learn); they are imported lazily
 and a missing one costs you the scatter, not the deck.
 
-Output is one self-contained HTML file per dataset (inline SVG + inline JS, no
-external assets), plus the pages tying them together: ``index.html`` (the
-circuits), ``paddock.html`` (every car, its colour and badge), and the standings
+Output is one self-contained HTML file per dataset and racing scenario (inline
+SVG + inline JS, no external assets), plus the pages tying them together:
+``index.html`` (the circuits, with a high-recall / fast selector),
+``paddock.html`` (every car, its colour, badge and record in both scenarios),
+and the standings
 -- ``standings.html`` listing the five championships, with one page each behind
 it (``standings-sherlock-holmes.html`` and friends).  The boards are declared in
 ``BOARDS`` and scored the way ``evaluator.print_boards`` scores them; each has
@@ -93,9 +95,15 @@ log = logging.getLogger("animate")
 DEFAULT_DB        = "results.db"
 DEFAULT_SCENARIO  = "high_recall"
 DEFAULT_OUT       = "races"
-DEFAULT_THRESHOLD = 0.95        # recall target of the high_recall scenario
 DEFAULT_LAPS      = 1
 DEFAULT_DURATION  = 20.0        # seconds of playback for the whole race
+
+# The two scenarios that make up the racing deck.  Championships may use other
+# scenarios (notably ``memory``), but only these have animated circuit pages.
+RACE_SCENARIOS = {
+    "high_recall": 0.95,
+    "fast": 0.80,
+}
 
 BASELINE_TEAM = "faiss-hnsw-baseline"   # not scored; off the grid unless --pace-car
 
@@ -627,6 +635,27 @@ def build_roster(races: dict[str, list[TeamRun]], winners: dict[str, str | None]
                                  -(e["best_qps"] or 0.0), e["team"]))
 
 
+def harmonize_appearances(races_by_scenario: dict[str, dict[str, list[TeamRun]]]) -> None:
+    """Give a team one colour and badge across both racing scenarios."""
+    runs = [r for races in races_by_scenario.values()
+            for grid in races.values() for r in grid]
+    teams = {r.team for r in runs if not r.baseline}
+    racing = sorted({r.team for r in runs if r.racing and not r.baseline})
+    tags = assign_tags(teams)
+    palette = {
+        team: TEAM_COLORS[i][1:] if i < len(TEAM_COLORS) else NEUTRAL
+        for i, team in enumerate(racing)
+    }
+    for team in racing[len(TEAM_COLORS):]:
+        log.warning("more than %d racing teams: %r falls back to the neutral "
+                    "colour (never generate a new hue)", len(TEAM_COLORS), team)
+    for r in runs:
+        if r.baseline:
+            r.color, r.tag = NEUTRAL, "PACE"
+        else:
+            r.color, r.tag = palette.get(r.team, NEUTRAL_DNS), tags[r.team]
+
+
 # ---------------------------------------------------------------------------
 # Championships
 #
@@ -882,7 +911,8 @@ def _payload(dataset: str, runs: list[TeamRun], scenario: str, threshold: float,
 
 def render_race(dataset: str, runs: list[TeamRun], scenario: str, threshold: float,
                 laps: int, duration: float, countdown: bool = True,
-                dots: list[tuple[float, float]] | None = None) -> str:
+                dots: list[tuple[float, float]] | None = None,
+                circuits_href: str = "index.html") -> str:
     data = _payload(dataset, runs, scenario, threshold, laps, duration, countdown)
     blob = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")
     circ = circuit(dataset)
@@ -891,7 +921,7 @@ def render_race(dataset: str, runs: list[TeamRun], scenario: str, threshold: flo
         .replace("__TITLE__", f"{dataset} &middot; {scenario}")
         .replace("__DATASET__", dataset)
         .replace("__SCENARIO__", scenario)
-        .replace("<!--__NAV__-->", nav_html(""))
+        .replace("<!--__NAV__-->", nav_html("", circuits_href))
         .replace("__TRACK_D__", circ.d)
         .replace("__CAR_SVG__", CAR_SVG)
         .replace("__VIEWBOX__", f"0 0 {VIEW_W} {VIEW_H}")
@@ -906,7 +936,7 @@ _PAGES = [("index.html", "Circuits"), ("paddock.html", "Paddock"),
           ("standings.html", "Standings")]
 
 
-def nav_html(current: str) -> str:
+def nav_html(current: str, circuits_href: str = "index.html") -> str:
     """The top level nav, with the page you are on marked.
 
     Every ``standings-*.html`` board lights the one Standings entry: the five
@@ -917,8 +947,18 @@ def nav_html(current: str) -> str:
         on = (current.startswith("standings") if href == "standings.html"
               else href == current)
         here = ' aria-current="page"' if on else ""
-        links.append('<a href="' + href + '"' + here + '>' + label + '</a>')
+        target = circuits_href if href == "index.html" else href
+        links.append('<a href="' + target + '"' + here + '>' + label + '</a>')
     return '<nav aria-label="Pages">' + "".join(links) + "</nav>"
+
+
+def scenario_nav_html(current: str, pages: dict[str, str]) -> str:
+    """The scenario chips above the circuit cards."""
+    links = []
+    for scenario in RACE_SCENARIOS:
+        here = ' aria-current="page"' if scenario == current else ""
+        links.append(f'<a href="{pages[scenario]}"{here}>{scenario}</a>')
+    return '<nav class="sub" aria-label="Racing scenario">' + "".join(links) + "</nav>"
 
 
 def subnav_html(current: str) -> str:
@@ -961,30 +1001,56 @@ def _car_svg(size: float, delay: str = "", spin: bool = True) -> str:
             f'<g class="{"spin" if spin else "parked"}"{delay}>{CAR_SVG}</g></svg>')
 
 
-def render_paddock(roster: list[dict], scenario: str) -> str:
+def _record(e: dict | None) -> str:
+    """A compact paddock record for one team in one scenario."""
+    if e is None:
+        return "no entries"
+    started = e["starts"] > 0
+    bits = [f'{e["starts"]} start' + ("" if e["starts"] == 1 else "s")]
+    if e["finishes"]:
+        bits.append(f'{e["finishes"]} finish' + ("" if e["finishes"] == 1 else "es"))
+    if e["retirements"]:
+        bits.append(f'{e["retirements"]} out')
+    if started:
+        return " &middot; ".join(bits)
+    return f'no start in {e["entries"]} entr' + ("y" if e["entries"] == 1 else "ies")
+
+
+def render_paddock(rosters: dict[str, list[dict]]) -> str:
+    by_scenario = {
+        scenario: {e["team"]: e for e in roster}
+        for scenario, roster in rosters.items()
+    }
+    # Preserve the high-recall roster order, then append any fast-only entries.
+    ordered = []
+    seen: set[str] = set()
+    for scenario in RACE_SCENARIOS:
+        for e in rosters.get(scenario, []):
+            if e["team"] not in seen:
+                ordered.append(e)
+                seen.add(e["team"])
+
     cards = []
-    for i, e in enumerate(roster):
-        started = e["starts"] > 0
+    for i, e in enumerate(ordered):
+        started = any(by_scenario.get(s, {}).get(e["team"], {}).get("starts", 0)
+                      for s in RACE_SCENARIOS)
         klass = "card" + ("" if started else " dns") + (" pace" if e["baseline"] else "")
-        bits = [f'{e["starts"]} start' + ("" if e["starts"] == 1 else "s")]
-        if e["finishes"]:
-            bits.append(f'{e["finishes"]} finish' + ("" if e["finishes"] == 1 else "es"))
-        if e["retirements"]:
-            bits.append(f'{e["retirements"]} out')
-        record = " &middot; ".join(bits) if started else \
-            f'no start in {e["entries"]} entr' + ("y" if e["entries"] == 1 else "ies")
+        records = "".join(
+            f'<p class="record"><strong>{scenario}:</strong> '
+            f'{_record(by_scenario.get(scenario, {}).get(e["team"]))}</p>'
+            for scenario in RACE_SCENARIOS
+        )
         cards.append(
             f'<article class="{klass}" '
             f'style="--car-l:{e["light"]};--car-d:{e["dark"]}">'
             + _car_svg(12.5, f' style="animation-delay:-{i * 2.6:.1f}s"')
             + f'<div class="card-body"><div class="badge">{e["tag"]}</div>'
             f'<h2>{e["team"]}</h2>'
-            f'<p class="record">{record}</p></div>'
+            f'{records}</div>'
             + "</article>"
         )
     return (
         PADDOCK_TEMPLATE
-        .replace("__SCENARIO__", scenario)
         .replace("<!--__NAV__-->", nav_html("paddock.html"))
         .replace("<!--__CARDS__-->", "\n".join(cards))
     )
@@ -1136,7 +1202,8 @@ def render_standings_hub(counts: dict[str, int], total: int) -> str:
     )
 
 
-def render_index(entries: list[dict], scenario: str) -> str:
+def render_index(entries: list[dict], scenario: str,
+                 scenario_pages: dict[str, str]) -> str:
     cards = []
     for e in entries:
         cards.append(
@@ -1155,7 +1222,8 @@ def render_index(entries: list[dict], scenario: str) -> str:
     return (
         INDEX_TEMPLATE
         .replace("__SCENARIO__", scenario)
-        .replace("<!--__NAV__-->", nav_html("index.html"))
+        .replace("<!--__NAV__-->", nav_html("index.html", scenario_pages[scenario]))
+        .replace("<!--__SCENARIOS__-->", scenario_nav_html(scenario, scenario_pages))
         .replace("<!--__CARDS__-->", "\n".join(cards))
     )
 
@@ -1312,13 +1380,29 @@ button.theme:hover { color: var(--text-1); }
 .card .umap path { stroke-width: 5; }
 """
 
-# The three static pages share one toggle: flip the explicit theme, letting the
-# :root[data-theme] blocks in _THEME_CSS take over from the media query.
+# This runs in the head, before styles or body content are painted, so navigating
+# to another generated page does not flash the OS theme before the saved one is
+# restored.  Storage can be unavailable for some file:// or privacy contexts;
+# in that case the existing system-preference fallback continues to work.
+_THEME_BOOTSTRAP = """
+try {
+  const theme = localStorage.getItem("orthogonal-grand-prix-theme");
+  if (theme === "light" || theme === "dark") {
+    document.documentElement.setAttribute("data-theme", theme);
+  }
+} catch (_) {}
+"""
+
+# The static pages share one toggle: flip the explicit theme, letting the
+# :root[data-theme] blocks in _THEME_CSS take over from the media query, then
+# persist that choice for the next generated page.
 _THEME_JS = """
 document.querySelector("button.theme").onclick = () => {
   const r = document.documentElement, t = r.getAttribute("data-theme");
   const dark = t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
-  r.setAttribute("data-theme", dark ? "light" : "dark");
+  const theme = dark ? "light" : "dark";
+  r.setAttribute("data-theme", theme);
+  try { localStorage.setItem("orthogonal-grand-prix-theme", theme); } catch (_) {}
 };
 """
 
@@ -1327,7 +1411,8 @@ PADDOCK_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Paddock &middot; __SCENARIO__</title>
+<script>__THEME_BOOTSTRAP__</script>
+<title>Paddock</title>
 <style>
 __THEME_CSS__
 __PAGE_CSS__
@@ -1346,6 +1431,8 @@ __PAGE_CSS__
   margin: .6rem 0 .4rem; font-size: 1.55rem; font-weight: 650; overflow-wrap: anywhere;
 }
 .card .record { margin: 0; font-size: 1.375rem; color: var(--text-2); }
+.card .record + .record { margin-top: .2rem; }
+.card .record strong { color: var(--text-1); font-weight: 600; }
 .card .muted { margin: .35rem 0 0; }
 .wins { display: block; margin-top: .3rem; font-weight: 600; color: var(--text-1); }
 .card.dns { opacity: .72; border-style: dashed; }
@@ -1357,8 +1444,8 @@ __PAGE_CSS__
 <header class="page">
   <div>
     <h1>The Paddock</h1>
-    <p>Every entry in the <strong>__SCENARIO__</strong> scenario. A car keeps its
-       colour and badge on every circuit.</p>
+    <p>Every entry across the <strong>high_recall</strong> and <strong>fast</strong>
+       scenarios. A car keeps its colour and badge on every circuit.</p>
   </div>
   <span class="spacer"></span>
   <!--__NAV__-->
@@ -1370,7 +1457,8 @@ __PAGE_CSS__
 <script>__THEME_JS__</script>
 </body>
 </html>
-""".replace("__THEME_CSS__", _THEME_CSS).replace("__PAGE_CSS__", _PAGE_CSS) \
+""".replace("__THEME_BOOTSTRAP__", _THEME_BOOTSTRAP) \
+   .replace("__THEME_CSS__", _THEME_CSS).replace("__PAGE_CSS__", _PAGE_CSS) \
    .replace("__THEME_JS__", _THEME_JS)
 
 STANDINGS_TEMPLATE = """<!doctype html>
@@ -1378,6 +1466,7 @@ STANDINGS_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<script>__THEME_BOOTSTRAP__</script>
 <title>__TITLE__ &middot; Championship</title>
 <style>
 __THEME_CSS__
@@ -1482,7 +1571,8 @@ td .met { display: block; margin-top: .1rem; font-size: 1.1rem; color: var(--tex
 <script>__THEME_JS__</script>
 </body>
 </html>
-""".replace("__THEME_CSS__", _THEME_CSS).replace("__PAGE_CSS__", _PAGE_CSS) \
+""".replace("__THEME_BOOTSTRAP__", _THEME_BOOTSTRAP) \
+   .replace("__THEME_CSS__", _THEME_CSS).replace("__PAGE_CSS__", _PAGE_CSS) \
    .replace("__THEME_JS__", _THEME_JS)
 
 HUB_TEMPLATE = """<!doctype html>
@@ -1490,6 +1580,7 @@ HUB_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<script>__THEME_BOOTSTRAP__</script>
 <title>Championships</title>
 <style>
 __THEME_CSS__
@@ -1539,7 +1630,8 @@ __PAGE_CSS__
 <script>__THEME_JS__</script>
 </body>
 </html>
-""".replace("__THEME_CSS__", _THEME_CSS).replace("__PAGE_CSS__", _PAGE_CSS) \
+""".replace("__THEME_BOOTSTRAP__", _THEME_BOOTSTRAP) \
+   .replace("__THEME_CSS__", _THEME_CSS).replace("__PAGE_CSS__", _PAGE_CSS) \
    .replace("__THEME_JS__", _THEME_JS)
 
 RACE_TEMPLATE = """<!doctype html>
@@ -1547,6 +1639,7 @@ RACE_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<script>__THEME_BOOTSTRAP__</script>
 <title>__TITLE__</title>
 <style>
 __THEME_CSS__
@@ -1859,7 +1952,9 @@ function isDark() {
   return matchMedia("(prefers-color-scheme: dark)").matches;
 }
 document.getElementById("theme").onclick = () => {
-  root.setAttribute("data-theme", isDark() ? "light" : "dark");
+  const theme = isDark() ? "light" : "dark";
+  root.setAttribute("data-theme", theme);
+  try { localStorage.setItem("orthogonal-grand-prix-theme", theme); } catch (_) {}
   paint();
 };
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", paint);
@@ -2393,7 +2488,8 @@ requestAnimationFrame(tick);
 </script>
 </body>
 </html>
-""".replace("__THEME_CSS__", _THEME_CSS).replace("__UMAP_CSS__", _UMAP_CSS)
+""".replace("__THEME_BOOTSTRAP__", _THEME_BOOTSTRAP) \
+   .replace("__THEME_CSS__", _THEME_CSS).replace("__UMAP_CSS__", _UMAP_CSS)
 
 
 INDEX_TEMPLATE = """<!doctype html>
@@ -2401,6 +2497,7 @@ INDEX_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<script>__THEME_BOOTSTRAP__</script>
 <title>Orthogonal Grand Prix &middot; __SCENARIO__</title>
 <style>
 __THEME_CSS__
@@ -2436,13 +2533,15 @@ __PAGE_CSS__
   <!--__NAV__-->
   <button class="theme" title="Toggle light / dark">&#9681;</button>
 </header>
+<!--__SCENARIOS__-->
 <div class="grid">
 <!--__CARDS__-->
 </div>
 <script>__THEME_JS__</script>
 </body>
 </html>
-""".replace("__THEME_CSS__", _THEME_CSS).replace("__PAGE_CSS__", _PAGE_CSS) \
+""".replace("__THEME_BOOTSTRAP__", _THEME_BOOTSTRAP) \
+   .replace("__THEME_CSS__", _THEME_CSS).replace("__PAGE_CSS__", _PAGE_CSS) \
    .replace("__THEME_JS__", _THEME_JS)
 
 
@@ -2459,15 +2558,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--db", default=DEFAULT_DB, help="SQLite results database")
     p.add_argument("--scenario", default=DEFAULT_SCENARIO,
-                   help="scenario to race (default: %(default)s)")
+                   choices=tuple(RACE_SCENARIOS),
+                   help="scenario used for index.html and unsuffixed race files; "
+                        "both racing scenarios are rendered (default: %(default)s)")
     p.add_argument("--out", default=DEFAULT_OUT, help="output directory")
     p.add_argument("--dataset", action="append", metavar="NAME",
                    help="only render this dataset (repeatable)")
-    p.add_argument("--recall-threshold", type=float, default=DEFAULT_THRESHOLD,
-                   help="recall a run must reach to be eligible to win the race "
+    p.add_argument("--recall-threshold", type=float,
+                   help="override the selected scenario's standard recall bar; "
+                        "recall a run must reach to be eligible to win the race "
                         "on a circuit, and below which a car retires; the "
                         "championship pages ignore it and use each trophy's own "
-                        "bar (default: %(default)s)")
+                        "bar")
     p.add_argument("--laps", type=int, default=DEFAULT_LAPS,
                    help="times round the circuit for a full run")
     p.add_argument("--duration", type=float, default=DEFAULT_DURATION,
@@ -2508,72 +2610,112 @@ def main() -> None:
     if not db.exists():
         raise SystemExit(f"no such database: {db}")
 
+    thresholds = dict(RACE_SCENARIOS)
+    if args.recall_threshold is not None:
+        thresholds[args.scenario] = args.recall_threshold
+
     # Read only: unlike evaluator.open_db(), never create or migrate tables here.
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
-        races = load_races(conn, args.scenario, args.recall_threshold,
-                           pace_car=args.pace_car)
-        if not races:
-            raise SystemExit(
-                f"no successful runs for scenario {args.scenario!r} in {db}")
+        races_by_scenario = {
+            scenario: load_races(conn, scenario, threshold, pace_car=args.pace_car)
+            for scenario, threshold in thresholds.items()
+        }
+        missing_scenarios = [s for s, races in races_by_scenario.items() if not races]
+        if missing_scenarios:
+            raise SystemExit("no successful runs for scenario(s) "
+                             + ", ".join(repr(s) for s in missing_scenarios)
+                             + f" in {db}")
 
-        season = len(races)                  # circuits before --dataset narrows it
+        season = len(races_by_scenario[args.scenario])
         if args.dataset:
-            missing = set(args.dataset) - races.keys()
-            for m in sorted(missing):
-                log.warning("dataset %r has no raceable run in scenario %r",
-                            m, args.scenario)
-            races = {d: r for d, r in races.items() if d in set(args.dataset)}
-            if not races:
+            wanted = set(args.dataset)
+            for scenario, races in races_by_scenario.items():
+                for dataset in sorted(wanted - races.keys()):
+                    log.warning("dataset %r has no raceable run in scenario %r",
+                                dataset, scenario)
+                races_by_scenario[scenario] = {
+                    d: grid for d, grid in races.items() if d in wanted
+                }
+            if not any(races_by_scenario.values()):
                 raise SystemExit("none of the requested datasets can be raced")
 
         # Every championship, not just the one that was raced: the boards carry
         # their own scenario and recall bar, so `fast` and `memory` get scored
         # here even when the circuits on screen are the `high_recall` ones.
-        boards = {b.slug: championship(conn, b, set(races)) for b in BOARDS}
+        board_datasets = set(races_by_scenario[args.scenario])
+        boards = {b.slug: championship(conn, b, board_datasets) for b in BOARDS}
     finally:
         conn.close()
 
+    harmonize_appearances(races_by_scenario)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    entries, winners = [], {}
-    for dataset in sorted(races):
-        runs = races[dataset]
-        dots = umap_points(dataset, Path(args.datasets_dir), Path(args.umap_cache),
-                           args.umap_sample, args.umap_seed)
-        html = render_race(dataset, runs, args.scenario, args.recall_threshold,
-                           args.laps, args.duration, args.countdown, dots)
-        path = out / f"{dataset}.html"
-        path.write_text(html, encoding="utf-8")
+    scenario_pages = {
+        scenario: ("index.html" if scenario == args.scenario
+                   else f'circuits-{scenario.replace("_", "-")}.html')
+        for scenario in RACE_SCENARIOS
+    }
+    all_datasets = sorted({d for races in races_by_scenario.values() for d in races})
+    dots_by_dataset = {
+        dataset: umap_points(dataset, Path(args.datasets_dir), Path(args.umap_cache),
+                             args.umap_sample, args.umap_seed)
+        for dataset in all_datasets
+    }
+    entries_by_scenario: dict[str, list[dict]] = {}
+    winners_by_scenario: dict[str, dict[str, str | None]] = {}
+    for scenario, races in races_by_scenario.items():
+        entries, winners = [], {}
+        for dataset in sorted(races):
+            runs = races[dataset]
+            path = out / (f"{dataset}.html" if scenario == args.scenario else
+                          f'{dataset}-{scenario.replace("_", "-")}.html')
+            html = render_race(
+                dataset, runs, scenario, thresholds[scenario], args.laps,
+                args.duration, args.countdown, dots_by_dataset[dataset],
+                scenario_pages[scenario],
+            )
+            path.write_text(html, encoding="utf-8")
 
-        data = _payload(dataset, runs, args.scenario, args.recall_threshold,
-                        args.laps, args.duration, args.countdown)
-        winner = next((r for r in runs if r.team == data["winner"]), None)
-        winners[dataset] = data["winner"]
-        circ = circuit(dataset)
-        entries.append({
-            "dataset": dataset,
-            "file": path.name,
-            "d": circ.d,
-            "umap": umap_svg(dots, circ, keep=INDEX_DOTS),
-            "winner": data["winner"],
-            "color": (winner.color[0] if winner else "var(--dns)"),
-            "n_teams": sum(1 for r in runs if r.racing),
-            "n_queries": data["n_queries"],
-        })
-        log.info("%-32s %d cars, %d queries, winner=%s",
-                 dataset, entries[-1]["n_teams"], data["n_queries"],
-                 data["winner"] or "-- (nobody met the recall target)")
+            data = _payload(dataset, runs, scenario, thresholds[scenario],
+                            args.laps, args.duration, args.countdown)
+            winner = next((r for r in runs if r.team == data["winner"]), None)
+            winners[dataset] = data["winner"]
+            circ = circuit(dataset)
+            entries.append({
+                "dataset": dataset,
+                "file": path.name,
+                "d": circ.d,
+                "umap": umap_svg(dots_by_dataset[dataset], circ, keep=INDEX_DOTS),
+                "winner": data["winner"],
+                "color": (winner.color[0] if winner else "var(--dns)"),
+                "n_teams": sum(1 for r in runs if r.racing),
+                "n_queries": data["n_queries"],
+            })
+            log.info("%-11s %-32s %d cars, %d queries, winner=%s",
+                     scenario, dataset, entries[-1]["n_teams"], data["n_queries"],
+                     data["winner"] or "-- (nobody met the recall target)")
+        entries_by_scenario[scenario] = entries
+        winners_by_scenario[scenario] = winners
 
-    roster = build_roster(races, winners)
+    rosters = {
+        scenario: build_roster(races, winners_by_scenario[scenario])
+        for scenario, races in races_by_scenario.items()
+    }
     (out / "paddock.html").write_text(
-        render_paddock(roster, args.scenario), encoding="utf-8")
+        render_paddock(rosters), encoding="utf-8")
+    paddock_teams = {e["team"] for roster in rosters.values() for e in roster}
     log.info("paddock: %d cars (%d never started)",
-             len(roster), sum(1 for e in roster if not e["starts"]))
+             len(paddock_teams),
+             sum(not any(next((e["starts"] for e in rosters[s]
+                               if e["team"] == team), 0)
+                         for s in RACE_SCENARIOS)
+                 for team in paddock_teams))
 
+    roster = rosters[args.scenario]
     look = board_look(roster, {e["team"] for b in boards.values() for e in b})
-    circuits = sorted(races)
+    circuits = sorted(races_by_scenario[args.scenario])
     counts = {}
     for b in BOARDS:
         scored = boards[b.slug]
@@ -2588,10 +2730,13 @@ def main() -> None:
     (out / "standings.html").write_text(
         render_standings_hub(counts, len(circuits)), encoding="utf-8")
 
+    for scenario, entries in entries_by_scenario.items():
+        (out / scenario_pages[scenario]).write_text(
+            render_index(entries, scenario, scenario_pages), encoding="utf-8")
     index = out / "index.html"
-    index.write_text(render_index(entries, args.scenario), encoding="utf-8")
-    log.info("wrote %d races + index, paddock and %d standings pages to %s/",
-             len(entries), len(BOARDS) + 1, out)
+    log.info("wrote %d races + %d circuit indexes, paddock and %d standings pages to %s/",
+             sum(map(len, entries_by_scenario.values())), len(entries_by_scenario),
+             len(BOARDS) + 1, out)
 
     if args.open:
         webbrowser.open(index.resolve().as_uri())
