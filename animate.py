@@ -206,6 +206,7 @@ class TeamRun:
     total_time: float | None = None
     build_time: float | None = None
     cum:        list[float] = field(default_factory=list)   # cumulative query times
+    recall_cum: list[float] = field(default_factory=list)  # cumulative recall sums
     color:      tuple[str, str] = NEUTRAL                   # (light, dark)
     tag:        str = ""
     qualified:  bool = False              # met the scenario's recall target
@@ -217,6 +218,7 @@ class TeamRun:
     out_time:   float | None = None
     out_progress: float | None = None
     out_reason: str | None = None
+    prize_status: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def racing(self) -> bool:
@@ -339,12 +341,13 @@ def load_races(conn: sqlite3.Connection, scenario: str, threshold: float,
             continue
         trace = traces.get(run_id, ())
         n = len(trace)
-        cum, acc = [], 0.0
+        cum, recall_cum, acc = [], [], 0.0
         got, out_index, out_time = 0.0, None, None
         for k, (qt, qr) in enumerate(trace, 1):
             acc += qt
             cum.append(round(acc, 6))
             got += qr
+            recall_cum.append(got)
             # Best final average still on the table: every remaining query a 1.0.
             # Monotone non-increasing, so the first k below the bar is the one.
             if out_index is None and (got + (n - k)) / n < threshold - RECALL_EPS:
@@ -355,7 +358,7 @@ def load_races(conn: sqlite3.Connection, scenario: str, threshold: float,
             out_index, out_time = None, None
         run = TeamRun(
             team=team, status=status, run_id=run_id, qps=qps, recall=recall,
-            total_time=total, build_time=build, cum=cum,
+            total_time=total, build_time=build, cum=cum, recall_cum=recall_cum,
             out_index=out_index, out_time=out_time,
             out_progress=(out_index / n if out_index is not None and n else None),
             out_reason=("recall unreachable" if out_index is not None else None),
@@ -733,6 +736,7 @@ class Board:
     # dataset.  README.md attaches it to the two prizes that would otherwise
     # reward an index that is cheap to hold or to build and hopeless to search.
     baseline_cap: float | None = None
+    badge: str = ""
 
     @property
     def file(self) -> str:
@@ -741,19 +745,21 @@ class Board:
 
 BOARDS = [
     Board("Sherlock Holmes", "sherlock-holmes", "high_recall", "qps", True, 0.95,
-          "qps", "The fastest approach that still finds what it was sent for."),
+          "qps", "The fastest approach that still finds what it was sent for.",
+          badge="SH"),
     Board("Bianconiglio", "bianconiglio", "fast", "qps", True, 0.80,
-          "qps", "Always late, always running: the fastest approach at recall 0.8."),
+          "qps", "Always late, always running: the fastest approach at recall 0.8.",
+          badge="BI"),
     Board("Dory", "dory", "memory", DORY_MEMORY, False, 0.95,
           "MB", "The smallest memory footprint, RAM and VRAM together, without "
           "forgetting the neighbours.",
-          baseline_cap=2.0),
+          baseline_cap=2.0, badge="DO"),
     Board("Marie Kondo", "marie-kondo", "high_recall", "build_time_s", False, 0.95,
           "s", "The quickest to tidy a dataset into an index.",
-          baseline_cap=2.0),
+          baseline_cap=2.0, badge="MK"),
     Board("Paperone", "paperone", "high_recall", "n_dist_queries", False, 0.95,
           "dists", "The stingiest with full distance computations.",
-          baseline_cap=2.0),
+          baseline_cap=2.0, badge="PA"),
 ]
 
 
@@ -784,7 +790,7 @@ def baseline_times(conn: sqlite3.Connection, scenario: str) -> dict[str, float]:
 
 def apply_latency_retirements(conn: sqlite3.Connection, scenario: str,
                               races: dict[str, list[TeamRun]]) -> None:
-    """Retire cars when latency caps eliminate their last possible prize.
+    """Record live prize eligibility and retire cars with no prize left.
 
     A capped prize stops being possible at its baseline-relative deadline when
     the run has not finished.  The car stays on track while any prize remains
@@ -807,8 +813,53 @@ def apply_latency_retirements(conn: sqlite3.Connection, scenario: str,
 
     for dataset, runs in races.items():
         for run in runs:
-            if not run.racing or run.baseline:
+            if not run.racing:
                 continue
+            if run.baseline:
+                continue
+
+            # Each badge has its own elimination time.  This is deliberately
+            # independent of the circuit's selected recall threshold: the
+            # badge describes the actual prize rules, including a custom
+            # --recall-threshold race whose bar differs from the championship.
+            for board in boards:
+                metric = metrics[board.slug].get(run.run_id)
+                losses: list[tuple[float, str]] = []
+                if metric is None:
+                    losses.append((0.0, "metric unavailable"))
+
+                n = len(run.recall_cum)
+                recall_loss = next((
+                    run.cum[k - 1]
+                    for k, got in enumerate(run.recall_cum, 1)
+                    if (got + (n - k)) / n < board.threshold - RECALL_EPS
+                ), None)
+                if recall_loss is not None:
+                    losses.append((recall_loss, "recall unreachable"))
+                elif (run.recall or 0.0) < board.threshold:
+                    # Keep the badge exact with championship(), including the
+                    # tiny interval hidden by RECALL_EPS in the animation rule.
+                    losses.append((run.total_time or run.cum[-1],
+                                   "recall unreachable"))
+
+                latency_ok = True
+                if board.baseline_cap is not None:
+                    baseline = caps[board.slug].get(dataset)
+                    if baseline is not None:
+                        deadline = board.baseline_cap * baseline
+                        latency_ok = ((run.total_time or 0.0) <= deadline)
+                        if not latency_ok:
+                            losses.append((deadline, "time limit"))
+
+                first_loss = min(losses, default=(None, None), key=lambda x: x[0])
+                run.prize_status[board.slug] = {
+                    "eligible": (metric is not None
+                                 and (run.recall or 0.0) >= board.threshold
+                                 and latency_ok),
+                    "lost_at": first_loss[0],
+                    "reason": first_loss[1],
+                }
+
             deadlines: list[tuple[float, Board]] = []
             latency_survivor = False
             for board in boards:
@@ -1001,6 +1052,10 @@ def _payload(dataset: str, runs: list[TeamRun], scenario: str, threshold: float,
     return {
         "dataset": dataset,
         "scenario": scenario,
+        "prizes": [
+            {"slug": board.slug, "title": board.title, "badge": board.badge}
+            for board in BOARDS if board.scenario == scenario
+        ],
         "threshold": threshold,
         "laps": laps,
         "n_queries": n_queries,
@@ -1032,6 +1087,7 @@ def _payload(dataset: str, runs: list[TeamRun], scenario: str, threshold: float,
                                  (r.out_index / len(r.cum)
                                   if r.out_index is not None and r.cum else None)),
                 "out_reason": r.out_reason,
+                "prizes": r.prize_status,
                 "cum": r.cum,
             }
             for r in runs
@@ -1404,7 +1460,7 @@ _THEME_CSS = """
   --text-1:#0b0b0b; --text-2:#52514e; --text-3:#84837c;
   --border:#dcdbd3;
   --grass:#e4e8dc; --asphalt:#4a4a47; --asphalt-2:#5a5a56;
-  --kerb-a:#d94a45; --kerb-b:#fbfbf9; --line:#f4f3ee;
+  --kerb-a:#d94a45; --kerb-b:#fbfbf9; --line:#f4f3ee; --success:#237f20;
   --neutral:#6b6a66; --dns:#8f8e88; --umap-dot:rgba(34,40,28,.52);
   --shadow:0 1px 2px rgba(0,0,0,.08), 0 8px 24px rgba(0,0,0,.06);
 }
@@ -1415,7 +1471,7 @@ _THEME_CSS = """
     --text-1:#ffffff; --text-2:#c3c2b7; --text-3:#8d8c83;
     --border:#343431;
     --grass:#1f231c; --asphalt:#3a3a37; --asphalt-2:#2e2e2b;
-    --kerb-a:#b83b37; --kerb-b:#d8d7cf; --line:#6e6d66;
+    --kerb-a:#b83b37; --kerb-b:#d8d7cf; --line:#6e6d66; --success:#43bd3d;
     --neutral:#9b9a92; --dns:#6f6e68; --umap-dot:rgba(210,220,194,.40);
     --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.4);
   }
@@ -1426,7 +1482,7 @@ _THEME_CSS = """
   --text-1:#ffffff; --text-2:#c3c2b7; --text-3:#8d8c83;
   --border:#343431;
   --grass:#1f231c; --asphalt:#3a3a37; --asphalt-2:#2e2e2b;
-  --kerb-a:#b83b37; --kerb-b:#d8d7cf; --line:#6e6d66;
+  --kerb-a:#b83b37; --kerb-b:#d8d7cf; --line:#6e6d66; --success:#43bd3d;
   --neutral:#9b9a92; --dns:#6f6e68; --umap-dot:rgba(210,220,194,.40);
   --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.4);
 }
@@ -1923,7 +1979,12 @@ aside {
 }
 aside h2 {
   margin: 0; padding: .95rem 1.3rem .6rem; font-size: 1.2rem; font-weight: 600;
+  display: flex; align-items: baseline; justify-content: space-between; gap: .8rem;
   text-transform: uppercase; letter-spacing: .08em; color: var(--text-3);
+}
+.eligibility-key {
+  font-size: .72rem; font-weight: 500; letter-spacing: .02em;
+  text-transform: none; white-space: nowrap;
 }
 #standings { position: relative; margin: 0 .8rem; flex: none; }
 .row {
@@ -1940,9 +2001,17 @@ aside h2 {
 .who { flex: 1; min-width: 0; }
 .who .nm {
   font-size: 1.5rem; font-weight: 600; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis;
+  overflow: hidden; text-overflow: ellipsis; line-height: 1.1;
 }
-.bar { height: .35rem; border-radius: .2rem; background: var(--surface-2); margin-top: .35rem; overflow: hidden; }
+.prizes { display: flex; gap: .25rem; margin-top: .18rem; min-height: 1.05rem; }
+.prize {
+  min-width: 2.55rem; padding: .1rem .28rem; border: 1px solid var(--border);
+  border-radius: 999px; color: var(--text-3); font-size: .72rem; font-weight: 700;
+  line-height: 1; letter-spacing: .04em; text-align: center; white-space: nowrap;
+}
+.prize.eligible { color: var(--success); border-color: var(--success); }
+.prize.ineligible { color: var(--kerb-a); border-color: var(--kerb-a); }
+.bar { height: .3rem; border-radius: .2rem; background: var(--surface-2); margin-top: .22rem; overflow: hidden; }
 .bar i { display: block; height: 100%; border-radius: .2rem; width: 0; }
 .gap {
   font-variant-numeric: tabular-nums; font-size: 1.3rem; color: var(--text-2);
@@ -2110,7 +2179,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   </div>
 
   <aside>
-    <h2>Standings</h2>
+    <h2>Standings <span class="eligibility-key">&middot; possible&nbsp;&nbsp;&#10003; eligible&nbsp;&nbsp;&times; ineligible</span></h2>
     <div id="standings"></div>
     <div id="table-view">
       <table>
@@ -2297,13 +2366,27 @@ racers.forEach(t => {
   row.className = "row";
   row.innerHTML =
     '<div class="pos"></div><div class="swatch"></div>' +
-    '<div class="who"><div class="nm"></div><div class="bar"><i></i></div></div>' +
+    '<div class="who"><div class="nm"></div><div class="prizes"></div>' +
+    '<div class="bar"><i></i></div></div>' +
     '<div class="gap"></div>';
   board.appendChild(row);
   t._row = row;
   t._pos = row.querySelector(".pos");
   t._sw = row.querySelector(".swatch");
   t._nm = row.querySelector(".nm");
+  t._prizes = {};
+  const prizeStrip = row.querySelector(".prizes");
+  if (t.baseline) {
+    prizeStrip.remove();
+  } else {
+    for (const prize of RACE.prizes) {
+      const badge = document.createElement("span");
+      badge.className = "prize possible";
+      badge.textContent = prize.badge + " \u00b7";
+      prizeStrip.appendChild(badge);
+      t._prizes[prize.slug] = badge;
+    }
+  }
   t._fill = row.querySelector(".bar i");
   t._gap = row.querySelector(".gap");
   t._nm.textContent = t.team;
@@ -2361,6 +2444,26 @@ function progressAt(t, cum) {
   return Math.min(1, (k + frac) / N);
 }
 const fmt = (s) => s.toFixed(3) + "s";
+
+function paintPrizeEligibility(t) {
+  if (t.baseline) return;
+  for (const prize of RACE.prizes) {
+    const badge = t._prizes[prize.slug];
+    const state = t.prizes[prize.slug];
+    let kind, symbol, description;
+    if (state && state.lost_at != null && simT >= state.lost_at) {
+      kind = "ineligible"; symbol = "\u00d7"; description = state.reason;
+    } else if (state && state.eligible && t._p >= 1) {
+      kind = "eligible"; symbol = "\u2713"; description = "eligible";
+    } else {
+      kind = "possible"; symbol = "\u00b7"; description = "still eligible";
+    }
+    badge.className = "prize " + kind;
+    badge.textContent = prize.badge + " " + symbol;
+    badge.title = prize.title + " \u2013 " + description;
+    badge.setAttribute("aria-label", badge.title);
+  }
+}
 
 let simT = 0, playing = true, speed = 1, last = null, celebrated = false, stamped = false;
 // Teams whose retirement has already been announced, plus the queue drained
@@ -2449,6 +2552,7 @@ function frame() {
     t._pos.textContent = t.baseline ? "" : t._out ? "\\u2014" : competitivePosition;
     t._fill.style.width = (t._p * 100).toFixed(2) + "%";
     t._fill.style.background = t._out ? "var(--neutral)" : colorOf(t);
+    paintPrizeEligibility(t);
     if (t._out) {
       t._gap.innerHTML = "<span class='flag'>out \\u00b7 " + t.out_reason +
                          "</span><br>@ " + t.out_index + " q";
