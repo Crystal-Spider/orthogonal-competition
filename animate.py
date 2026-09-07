@@ -23,6 +23,12 @@ rather than circulating to the end only to be labelled DNF.  Because the bound
 is monotone and ends at the run's own average, every run finishing below the
 target retires somewhere (at worst on the line itself).
 
+Prize latency limits use the same retirement animation.  Once a car passes a
+board's baseline-relative deadline that prize is no longer available; the car
+spins off when that removes its last possible prize.  An uncapped prize keeps it
+on track, so the high_recall race still allows a late Sherlock Holmes result,
+while memory's sole 2x-baseline Dory limit is decisive.
+
 The unscored ``faiss-hnsw-baseline`` reference run is left off the grid by
 default; ``--pace-car`` puts it back as a grey pace car (always DNF, since its
 recall sits below the target).
@@ -42,13 +48,13 @@ and a missing one costs you the scatter, not the deck.
 Output is one self-contained HTML file per dataset and racing scenario (inline
 SVG + inline JS, no external assets), plus the pages tying them together:
 ``index.html`` (the circuits, with a high-recall / fast selector),
-``paddock.html`` (every car, its colour, badge and record in both scenarios),
+``paddock.html`` (every car, its colour, badge and record in every selected scenario),
 and the standings
 -- ``standings.html`` listing the five championships, with one page each behind
 it (``standings-sherlock-holmes.html`` and friends).  The boards are declared in
 ``BOARDS`` and scored the way ``evaluator.print_boards`` scores them; each has
-its own scenario, metric and recall bar, so all five are rendered whatever
-``--scenario`` is being raced, and ``--recall-threshold`` only moves the racing.
+its own scenario, metric and recall bar, so all five are rendered whichever
+``--scenario`` values are raced, and ``--recall-threshold`` only moves the racing.
 Dory and Marie Kondo additionally apply the README's rule that a run must stay
 within twice the baseline's query time, which ``evaluator.py`` does not.
 The hub page names no winner on purpose: watch the races first.
@@ -63,7 +69,8 @@ nothing left to letterbox and the race falls back to a plain scrolling page.
 
     python animate.py
     python animate.py --pace-car
-    python animate.py --scenario fast --recall-threshold 0.8 --laps 3
+    python animate.py --scenario fast --laps 3
+    python animate.py --scenario high_recall --scenario memory
     python animate.py --dataset imagenet-clip-private --no-countdown --open
     python animate.py --umap-sample 2000        # sparser infields, faster build
 """
@@ -71,6 +78,7 @@ nothing left to letterbox and the race falls back to a plain scrolling page.
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
 import itertools
 import json
@@ -93,16 +101,16 @@ log = logging.getLogger("animate")
 # ---------------------------------------------------------------------------
 
 DEFAULT_DB        = "results.db"
-DEFAULT_SCENARIO  = "high_recall"
 DEFAULT_OUT       = "races"
 DEFAULT_LAPS      = 1
 DEFAULT_DURATION  = 20.0        # seconds of playback for the whole race
 
-# The two scenarios that make up the racing deck.  Championships may use other
-# scenarios (notably ``memory``), but only these have animated circuit pages.
+# The available animated racing scenarios and their standard recall bars.
+# Dict order is the default page order, with high_recall retaining index.html.
 RACE_SCENARIOS = {
     "high_recall": 0.95,
     "fast": 0.80,
+    "memory": 0.95,
 }
 
 BASELINE_TEAM = "faiss-hnsw-baseline"   # not scored; off the grid unless --pace-car
@@ -190,6 +198,7 @@ class TeamRun:
 
     team:       str
     status:     str                       # 'success' | 'failed' | 'timeout'
+    run_id:     int | None = None         # source row, for exact prize eligibility
     qps:        float | None = None
     recall:     float | None = None
     total_time: float | None = None
@@ -200,11 +209,12 @@ class TeamRun:
     qualified:  bool = False              # met the scenario's recall target
     baseline:   bool = False
     error:      str | None = None
-    # Retirement: the 1-based query at which the recall target became
-    # unreachable, and the wall clock moment that query completed.  None when
-    # the run stayed in contention all the way to the flag.
+    # Retirement: query/progress, wall-clock moment, and cause at which the run
+    # lost its last possible prize.  None when it stayed in contention.
     out_index:  int | None = None
     out_time:   float | None = None
+    out_progress: float | None = None
+    out_reason: str | None = None
 
     @property
     def racing(self) -> bool:
@@ -340,9 +350,11 @@ def load_races(conn: sqlite3.Connection, scenario: str, threshold: float,
             if out_index is None and (got + (n - k)) / n < threshold - RECALL_EPS:
                 out_index, out_time = k, cum[-1]
         run = TeamRun(
-            team=team, status=status, qps=qps, recall=recall,
+            team=team, status=status, run_id=run_id, qps=qps, recall=recall,
             total_time=total, build_time=build, cum=cum,
             out_index=out_index, out_time=out_time,
+            out_progress=(out_index / n if out_index is not None and n else None),
+            out_reason=("recall unreachable" if out_index is not None else None),
             color=NEUTRAL if team == BASELINE_TEAM
                   else palette.get(team, NEUTRAL_DNS),
             tag="PACE" if team == BASELINE_TEAM else tags[team],
@@ -600,13 +612,17 @@ def umap_svg(points: list[tuple[float, float]] | None, circ: Circuit,
             f'aria-hidden="true"><path d="{d}"/></g>')
 
 
-def build_roster(races: dict[str, list[TeamRun]], winners: dict[str, str | None]
-                 ) -> list[dict]:
+def build_roster(races: dict[str, list[TeamRun]], winners: dict[str, str | None],
+                 eligible: set[int]) -> list[dict]:
     """One entry per team in the scenario, folded over every circuit.
 
     Teams that only ever failed or timed out are kept -- a team that entered and
     never made a grid should be visible, not silently absent -- and carry the
     reserved "did not start" grey they already have from ``load_races``.
+
+    A started run finishes when it is eligible for at least one championship in
+    this scenario.  Eligibility is supplied by :func:`prize_eligibility`, so the
+    Paddock uses the same recall, metric and baseline-cap rules as Standings.
     """
     roster: dict[str, dict] = {}
     for dataset, runs in races.items():
@@ -620,10 +636,10 @@ def build_roster(races: dict[str, list[TeamRun]], winners: dict[str, str | None]
             if not r.racing:
                 continue
             e["starts"] += 1
-            if r.retired:
-                e["retirements"] += 1
-            else:
+            if r.run_id in eligible:
                 e["finishes"] += 1
+            else:
+                e["retirements"] += 1
             if winners.get(dataset) == r.team:
                 e["wins"] += 1
             if r.qps is not None and (e["best_qps"] is None or r.qps > e["best_qps"]):
@@ -751,8 +767,76 @@ def baseline_times(conn: sqlite3.Connection, scenario: str) -> dict[str, float]:
         (scenario, BASELINE_TEAM))}
 
 
+def apply_latency_retirements(conn: sqlite3.Connection, scenario: str,
+                              races: dict[str, list[TeamRun]]) -> None:
+    """Retire cars when latency caps eliminate their last possible prize.
+
+    A capped prize stops being possible at its baseline-relative deadline when
+    the run has not finished.  The car stays on track while any prize remains
+    possible: this is why high_recall cars are not retired by the Marie Kondo
+    and Paperone caps while uncapped Sherlock Holmes is still available.
+    """
+    boards = [board for board in BOARDS if board.scenario == scenario]
+    if not boards:
+        return
+
+    metrics: dict[str, dict[int, float | None]] = {}
+    caps: dict[str, dict[str, float]] = {}
+    for board in boards:
+        metrics[board.slug] = dict(conn.execute(
+            f"select id, {board.metric} from runs where scenario = ?",
+            (scenario,),
+        ))
+        if board.baseline_cap is not None:
+            caps[board.slug] = baseline_times(conn, scenario)
+
+    for dataset, runs in races.items():
+        for run in runs:
+            if not run.racing or run.baseline:
+                continue
+            deadlines: list[tuple[float, Board]] = []
+            latency_survivor = False
+            for board in boards:
+                # A missing metric makes this prize statically unavailable; it
+                # cannot keep the car alive and has no future deadline event.
+                if metrics[board.slug].get(run.run_id) is None:
+                    continue
+                if board.baseline_cap is None:
+                    latency_survivor = True
+                    break
+                baseline = caps[board.slug].get(dataset)
+                if baseline is None:          # championship leaves cap unapplied
+                    latency_survivor = True
+                    break
+                deadline = board.baseline_cap * baseline
+                if run.total_time is None or run.total_time <= deadline:
+                    latency_survivor = True
+                    break
+                deadlines.append((deadline, board))
+
+            if latency_survivor or not deadlines:
+                continue
+            # All latency-viable prizes are gone once the last deadline passes.
+            deadline, _ = max(deadlines, key=lambda item: item[0])
+            if run.out_time is not None and run.out_time <= deadline:
+                continue                         # recall already sent it off
+            k = bisect.bisect_right(run.cum, deadline)
+            if k >= len(run.cum):
+                progress = 1.0
+            else:
+                previous = run.cum[k - 1] if k else 0.0
+                span = run.cum[k] - previous
+                fraction = (deadline - previous) / span if span > 0 else 0.0
+                progress = min(1.0, (k + fraction) / len(run.cum))
+            run.out_index = k
+            run.out_time = deadline
+            run.out_progress = progress
+            run.out_reason = "time limit"
+
+
 def championship(conn: sqlite3.Connection, board: Board,
-                 datasets: set[str] | None = None) -> list[dict]:
+                 datasets: set[str] | None = None,
+                 eligible_run_ids: set[int] | None = None) -> list[dict]:
     """Season points for one board, scored the way ``evaluator.print_boards`` does.
 
     Deliberately queries ``runs`` itself instead of scoring off the loaded grid:
@@ -784,7 +868,7 @@ def championship(conn: sqlite3.Connection, board: Board,
     points = [10, 8, 6, 4, 3, 2, 1, 0, 0, 0, 0, 0]
     rows = conn.execute(
         f"""
-        select dataset, team_name, {board.metric}, status, avg_recall,
+        select id, dataset, team_name, {board.metric}, status, avg_recall,
                total_query_time_s
         from runs where scenario = ? and team_name not like 'faiss%'
         order by dataset, {board.metric} {"desc" if board.descending else "asc"}
@@ -793,7 +877,7 @@ def championship(conn: sqlite3.Connection, board: Board,
     caps: dict[str, float] = {}
     if board.baseline_cap is not None:
         caps = baseline_times(conn, board.scenario)
-        missing = {d for d, *_ in rows if d not in caps}
+        missing = {d for _, d, *_ in rows if d not in caps}
         if datasets is not None:
             missing &= datasets
         for d in sorted(missing):
@@ -801,7 +885,7 @@ def championship(conn: sqlite3.Connection, board: Board,
                         "applied there", board.title, BASELINE_TEAM, d,
                         board.baseline_cap)
 
-    teams = {r[1] for r in rows if r[1] != BASELINE_TEAM}
+    teams = {r[2] for r in rows if r[2] != BASELINE_TEAM}
     scored = {t: {"team": t, "points": 0, "per_dataset": {}} for t in teams}
     # `idx` is the slot the next eligible run consumes; `slot` is the one the
     # current run scores, which lags behind it for the second and later run of a
@@ -809,7 +893,7 @@ def championship(conn: sqlite3.Connection, board: Board,
     # None is a metric value the rows can legitimately carry.
     unmeasured = object()
     last_dataset, idx, slot, last_metric = None, 0, 0, unmeasured
-    for dataset, team, metric, status, recall, query_time in rows:
+    for run_id, dataset, team, metric, status, recall, query_time in rows:
         if datasets is not None and dataset not in datasets:
             continue
         if dataset != last_dataset:
@@ -823,6 +907,8 @@ def championship(conn: sqlite3.Connection, board: Board,
         if (board.baseline_cap is not None and dataset in caps
                 and (query_time or 0.0) > board.baseline_cap * caps[dataset]):
             continue
+        if eligible_run_ids is not None:
+            eligible_run_ids.add(run_id)
         if metric != last_metric:
             slot, last_metric = idx, metric
         if team in scored:
@@ -832,6 +918,23 @@ def championship(conn: sqlite3.Connection, board: Board,
         idx += 1
 
     return sorted(scored.values(), key=lambda e: (-e["points"], e["team"]))
+
+
+def prize_eligibility(conn: sqlite3.Connection, scenario: str,
+                      datasets: set[str]) -> set[int]:
+    """The run IDs eligible for any prize in ``scenario``.
+
+    ``championship`` is the single source of truth for eligibility and records
+    each exact run that passes while it scores the board.  Unioning those IDs
+    implements "all requirements for at least one prize" without a second,
+    subtly different copy of the rules.
+    """
+    eligible: set[int] = set()
+    for board in BOARDS:
+        if board.scenario != scenario:
+            continue
+        championship(conn, board, datasets, eligible)
+    return eligible
 
 
 def rank_groups(scored: list[dict]) -> list[tuple[int, list[dict]]]:
@@ -869,7 +972,7 @@ def _payload(dataset: str, runs: list[TeamRun], scenario: str, threshold: float,
                     + [r.out_time or 0.0 for r in racers])
 
     finishers = sorted(racers, key=lambda r: r.cum[-1])
-    winner = next((r.team for r in finishers if r.qualified), None)
+    winner = next((r.team for r in finishers if r.qualified and not r.retired), None)
     # "First across the line" only counts cars that were still running: a
     # retirement never crosses it, so it can never take that mention either.
     fastest = next((r.team for r in finishers if not r.retired), None)
@@ -902,6 +1005,10 @@ def _payload(dataset: str, runs: list[TeamRun], scenario: str, threshold: float,
                 "error": (r.error or "").strip()[:160] or None,
                 "out_index": r.out_index,
                 "out_time": r.out_time,
+                "out_progress": (r.out_progress if r.out_progress is not None else
+                                 (r.out_index / len(r.cum)
+                                  if r.out_index is not None and r.cum else None)),
+                "out_reason": r.out_reason,
                 "cum": r.cum,
             }
             for r in runs
@@ -955,7 +1062,7 @@ def nav_html(current: str, circuits_href: str = "index.html") -> str:
 def scenario_nav_html(current: str, pages: dict[str, str]) -> str:
     """The scenario chips above the circuit cards."""
     links = []
-    for scenario in RACE_SCENARIOS:
+    for scenario in pages:
         here = ' aria-current="page"' if scenario == current else ""
         links.append(f'<a href="{pages[scenario]}"{here}>{scenario}</a>')
     return '<nav class="sub" aria-label="Racing scenario">' + "".join(links) + "</nav>"
@@ -1021,10 +1128,12 @@ def render_paddock(rosters: dict[str, list[dict]]) -> str:
         scenario: {e["team"]: e for e in roster}
         for scenario, roster in rosters.items()
     }
-    # Preserve the high-recall roster order, then append any fast-only entries.
+    scenarios = list(rosters)
+    # Preserve the first scenario's roster order, then append entries that only
+    # occur in later selected scenarios.
     ordered = []
     seen: set[str] = set()
-    for scenario in RACE_SCENARIOS:
+    for scenario in scenarios:
         for e in rosters.get(scenario, []):
             if e["team"] not in seen:
                 ordered.append(e)
@@ -1033,12 +1142,12 @@ def render_paddock(rosters: dict[str, list[dict]]) -> str:
     cards = []
     for i, e in enumerate(ordered):
         started = any(by_scenario.get(s, {}).get(e["team"], {}).get("starts", 0)
-                      for s in RACE_SCENARIOS)
+                      for s in scenarios)
         klass = "card" + ("" if started else " dns") + (" pace" if e["baseline"] else "")
         records = "".join(
             f'<p class="record"><strong>{scenario}:</strong> '
             f'{_record(by_scenario.get(scenario, {}).get(e["team"]))}</p>'
-            for scenario in RACE_SCENARIOS
+            for scenario in scenarios
         )
         cards.append(
             f'<article class="{klass}" '
@@ -1051,9 +1160,20 @@ def render_paddock(rosters: dict[str, list[dict]]) -> str:
         )
     return (
         PADDOCK_TEMPLATE
+        .replace("__SCENARIO_LIST__", _scenario_list(scenarios))
         .replace("<!--__NAV__-->", nav_html("paddock.html"))
         .replace("<!--__CARDS__-->", "\n".join(cards))
     )
+
+
+def _scenario_list(scenarios: list[str]) -> str:
+    """Selected scenario names as a natural-language HTML list."""
+    names = [f"<strong>{scenario}</strong>" for scenario in scenarios]
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + ", and " + names[-1]
 
 
 def board_look(roster: list[dict], teams: Iterable[str]) -> dict[str, dict]:
@@ -1444,8 +1564,8 @@ __PAGE_CSS__
 <header class="page">
   <div>
     <h1>The Paddock</h1>
-    <p>Every entry across the <strong>high_recall</strong> and <strong>fast</strong>
-       scenarios. A car keeps its colour and badge on every circuit.</p>
+    <p>Every entry from __SCENARIO_LIST__. A car keeps its colour and badge on
+       every circuit.</p>
   </div>
   <span class="spacer"></span>
   <!--__NAV__-->
@@ -1814,13 +1934,18 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   70%  { opacity: .92; }
   100% { opacity: 0; transform: translateX(105%) skewX(-12deg); }
 }
-#toast {
-  position: absolute; left: 50%; bottom: 1.8rem; transform: translateX(-50%) translateY(.6rem);
+#toasts {
+  position: absolute; left: 50%; bottom: 1.8rem; transform: translateX(-50%);
+  width: 90%; display: flex; flex-direction: column; align-items: center; gap: .55rem;
+  pointer-events: none;
+}
+.toast {
   background: var(--surface-1); border: 1px solid var(--border); border-radius: .8rem;
   padding: .7rem 1.1rem; font-size: 1.4rem; color: var(--text-2); box-shadow: var(--shadow);
-  opacity: 0; transition: opacity .3s, transform .3s; pointer-events: none; max-width: 90%;
+  opacity: 0; transform: translateY(.6rem); transition: opacity .3s, transform .3s;
+  max-width: 100%;
 }
-#toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.on { opacity: 1; transform: translateY(0); }
 
 /* Start lights.  The gantry sits over the grid while the pre-roll runs; it is
    pointer-transparent so nothing under it becomes unclickable mid-countdown. */
@@ -1910,7 +2035,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
     </svg>
     <canvas id="confetti"></canvas>
     <div id="sweep"></div>
-    <div id="toast" role="status" aria-live="polite"></div>
+    <div id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
     <div id="lights" role="status" aria-live="assertive">
       <div id="gantry"><i></i><i></i><i></i><i></i><i></i></div>
       <div id="cd-num"></div>
@@ -2053,9 +2178,10 @@ racers.forEach((t, i) => {
   // Starting grid slot: two columns, staggered back from the line, in the
   // payload's own order (fastest run first) -- a pretend qualifying result.
   t._row2 = Math.floor(i / 2); t._slot = (i % 2) ? .5 : -.5;
-  // Where it was standing when the target went out of reach -- a pure function
-  // of the payload, so the run-off spot never depends on how we got there.
-  t._outP = t.out_index == null ? null : Math.min(1, t.out_index / N);
+  // Where it was standing when its last prize became unreachable -- a pure
+  // function of the payload, so the run-off spot never depends on how we got
+  // there.  A latency deadline can fall between two completed queries.
+  t._outP = t.out_progress == null ? null : Math.min(1, t.out_progress);
 });
 
 // Where a retiring car comes to rest.  It depends only on the query it went out
@@ -2112,11 +2238,12 @@ if (dns.length) {
 }
 
 // results table (accessible alternative to the colour encoding)
+const outLabel = (t) => "query " + t.out_index + " \\u2013 " + t.out_reason;
 document.getElementById("tbody").innerHTML = RACE.teams.map(t => {
   const res = t.cum.length === 0 ? t.status.toUpperCase()
             : t.team === RACE.winner ? "WINNER"
             : t.out_index != null
-              ? "OUT \\u00b7 recall unreachable @ " + t.out_index + " q"
+              ? "OUT \\u00b7 " + outLabel(t)
             : t.qualified ? "finished" : "DNF (recall)";
   const f = (v, d) => v == null ? "\\u2014" : v.toFixed(d);
   return "<tr><td>" + t.team + "</td><td class='num'>" + f(t.qps, 1) +
@@ -2155,11 +2282,11 @@ function progressAt(t, cum) {
 const fmt = (s) => s.toFixed(3) + "s";
 
 let simT = 0, playing = true, speed = 1, last = null, celebrated = false, stamped = false;
-// Teams whose retirement has already been announced, plus the little queue that
-// stops five simultaneous spin-offs firing five toasts.  Like `celebrated` and
-// `stamped` this is a latch over a value derived from simT, never a state of
-// its own: rearm() recomputes all three whenever simT jumps.
-let announced = new Set(), outQueue = [], outWindow = 0, outHold = 0;
+// Teams whose retirement has already been announced, plus the queue drained
+// into the toast stack once per frame.  Like `celebrated` and `stamped` this is
+// a latch over a value derived from simT, never a state of its own: rearm()
+// recomputes all three whenever simT jumps.
+let announced = new Set(), outQueue = [];
 // Seconds of countdown still to run, or null once the race owns the clock.
 let preroll = null, goTimer = null;
 
@@ -2239,8 +2366,8 @@ function frame() {
     t._fill.style.width = (t._p * 100).toFixed(2) + "%";
     t._fill.style.background = t._out ? "var(--neutral)" : colorOf(t);
     if (t._out) {
-      t._gap.innerHTML = "<span class='flag'>out \\u00b7 recall unreachable</span><br>@ " +
-        t.out_index + " q";
+      t._gap.innerHTML = "<span class='flag'>out \\u00b7 " + t.out_reason +
+                         "</span><br>@ " + t.out_index + " q";
     } else if (t._p >= 1) {
       t._gap.innerHTML = "<span class='flag'>" +
         (t.qualified ? "finished" : "dnf recall " + t.recall.toFixed(3)) +
@@ -2337,48 +2464,36 @@ function tick(now) {
 }
 
 // ---- celebration -----------------------------------------------------------
-let toastTimer = null;
 function toast(html) {
-  const el = document.getElementById("toast");
-  el.innerHTML = html; el.classList.add("on");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("on"), 5200);
+  const el = document.createElement("div");
+  el.className = "toast"; el.innerHTML = html;
+  document.getElementById("toasts").appendChild(el);
+  requestAnimationFrame(() => el.classList.add("on"));
+  setTimeout(() => {
+    el.classList.remove("on");
+    setTimeout(() => el.remove(), 300);
+  }, 5200);
 }
 
-// A pile-up can take several cars out within a handful of frames, and one
-// toast each would be a strobe.  Queued retirements are held for a short
-// window so simultaneous ones merge into a single line, and consecutive
-// batches are spaced out; the queue itself is rebuilt by rearm() on a scrub,
-// so a jump through half the race never dumps a backlog on screen.
+// A pile-up can take several cars out in one frame.  Drain them together but
+// create one toast node per car, so their messages appear simultaneously as a
+// vertical stack rather than being merged or delayed.
 function flushOut() {
   if (!outQueue.length) return;
-  const now = performance.now();
-  if (!outWindow) { outWindow = now; return; }
-  if (now - outWindow < 200 || now < outHold) return;
-
-  const batch = outQueue.sort((a, b) => a.out_index - b.out_index);
-  outQueue = []; outWindow = 0; outHold = now + 2800;
-
+  outQueue.sort((a, b) => a.out_time - b.out_time);
   const boom = "\\ud83d\\udca5 ";
   const named = (t) => "<strong>" + t.team + "</strong>";
-  if (batch.length === 1) {
-    toast(boom + named(batch[0]) + " is out on query " + batch[0].out_index +
-          " \\u2014 recall " + RACE.threshold + " can no longer be reached.");
-  } else if (batch.length <= 3) {
-    toast(boom + batch.map(t => named(t) + " (" + t.out_index + " q)").join(", ") +
-          " \\u2014 out, the recall target is beyond all of them.");
-  } else {
-    toast(boom + batch.length + " cars out between query " + batch[0].out_index +
-          " and " + batch[batch.length - 1].out_index +
-          " \\u2014 recall " + RACE.threshold + " unreachable.");
+  for (const retired of outQueue) {
+    toast(boom + named(retired) + ": " + outLabel(retired) + ".");
   }
+  outQueue = [];
 }
 
 function celebrate(w, order) {
   const sweep = document.getElementById("sweep");
   sweep.classList.remove("go"); void sweep.offsetWidth; sweep.classList.add("go");
 
-  const second = order.find(t => t !== w && t.qualified);
+  const second = order.find(t => t !== w && t.qualified && t.out_index == null);
   const margin = second ? (second.cum[second.cum.length - 1] - w.cum[w.cum.length - 1]) : null;
 
   w._pulse.animate(
@@ -2465,7 +2580,8 @@ function rearm() {
   stamped = crossed(RACE.fastest);
   announced = new Set(racers.filter(t => t.out_time != null && simT >= t.out_time)
                             .map(t => t.team));
-  outQueue = []; outWindow = 0; outHold = 0;
+  outQueue = [];
+  document.getElementById("toasts").replaceChildren();
 }
 document.getElementById("scrub").oninput = (e) => {
   cancelCountdown();
@@ -2557,15 +2673,15 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=__doc__,
     )
     p.add_argument("--db", default=DEFAULT_DB, help="SQLite results database")
-    p.add_argument("--scenario", default=DEFAULT_SCENARIO,
-                   choices=tuple(RACE_SCENARIOS),
-                   help="scenario used for index.html and unsuffixed race files; "
-                        "both racing scenarios are rendered (default: %(default)s)")
+    p.add_argument("--scenario", action="append", choices=tuple(RACE_SCENARIOS),
+                   help="scenario to render; repeat to select several. The first "
+                        "uses index.html and unsuffixed race files (default: all)")
     p.add_argument("--out", default=DEFAULT_OUT, help="output directory")
     p.add_argument("--dataset", action="append", metavar="NAME",
                    help="only render this dataset (repeatable)")
     p.add_argument("--recall-threshold", type=float,
-                   help="override the selected scenario's standard recall bar; "
+                   help="override the selected scenario's standard recall bar "
+                        "(requires exactly one --scenario); "
                         "recall a run must reach to be eligible to win the race "
                         "on a circuit, and below which a car retires; the "
                         "championship pages ignore it and use each trophy's own "
@@ -2601,7 +2717,8 @@ def main() -> None:
         format="%(asctime)s  %(levelname)-8s  %(message)s",
         datefmt="%H:%M:%S",
     )
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
 
     if args.laps < 1:
         args.laps = 1
@@ -2610,9 +2727,13 @@ def main() -> None:
     if not db.exists():
         raise SystemExit(f"no such database: {db}")
 
-    thresholds = dict(RACE_SCENARIOS)
+    scenarios = list(dict.fromkeys(args.scenario or RACE_SCENARIOS))
+    primary_scenario = scenarios[0]
+    if args.recall_threshold is not None and len(scenarios) != 1:
+        parser.error("--recall-threshold requires exactly one --scenario")
+    thresholds = {scenario: RACE_SCENARIOS[scenario] for scenario in scenarios}
     if args.recall_threshold is not None:
-        thresholds[args.scenario] = args.recall_threshold
+        thresholds[primary_scenario] = args.recall_threshold
 
     # Read only: unlike evaluator.open_db(), never create or migrate tables here.
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
@@ -2627,7 +2748,7 @@ def main() -> None:
                              + ", ".join(repr(s) for s in missing_scenarios)
                              + f" in {db}")
 
-        season = len(races_by_scenario[args.scenario])
+        season = len(races_by_scenario[primary_scenario])
         if args.dataset:
             wanted = set(args.dataset)
             for scenario, races in races_by_scenario.items():
@@ -2640,11 +2761,18 @@ def main() -> None:
             if not any(races_by_scenario.values()):
                 raise SystemExit("none of the requested datasets can be raced")
 
+        for scenario, races in races_by_scenario.items():
+            apply_latency_retirements(conn, scenario, races)
+
         # Every championship, not just the one that was raced: the boards carry
         # their own scenario and recall bar, so `fast` and `memory` get scored
         # here even when the circuits on screen are the `high_recall` ones.
-        board_datasets = set(races_by_scenario[args.scenario])
+        board_datasets = set(races_by_scenario[primary_scenario])
         boards = {b.slug: championship(conn, b, board_datasets) for b in BOARDS}
+        eligibility_by_scenario = {
+            scenario: prize_eligibility(conn, scenario, set(races))
+            for scenario, races in races_by_scenario.items()
+        }
     finally:
         conn.close()
 
@@ -2653,9 +2781,9 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     scenario_pages = {
-        scenario: ("index.html" if scenario == args.scenario
+        scenario: ("index.html" if scenario == primary_scenario
                    else f'circuits-{scenario.replace("_", "-")}.html')
-        for scenario in RACE_SCENARIOS
+        for scenario in scenarios
     }
     all_datasets = sorted({d for races in races_by_scenario.values() for d in races})
     dots_by_dataset = {
@@ -2669,7 +2797,7 @@ def main() -> None:
         entries, winners = [], {}
         for dataset in sorted(races):
             runs = races[dataset]
-            path = out / (f"{dataset}.html" if scenario == args.scenario else
+            path = out / (f"{dataset}.html" if scenario == primary_scenario else
                           f'{dataset}-{scenario.replace("_", "-")}.html')
             html = render_race(
                 dataset, runs, scenario, thresholds[scenario], args.laps,
@@ -2700,7 +2828,8 @@ def main() -> None:
         winners_by_scenario[scenario] = winners
 
     rosters = {
-        scenario: build_roster(races, winners_by_scenario[scenario])
+        scenario: build_roster(races, winners_by_scenario[scenario],
+                               eligibility_by_scenario[scenario])
         for scenario, races in races_by_scenario.items()
     }
     (out / "paddock.html").write_text(
@@ -2710,12 +2839,12 @@ def main() -> None:
              len(paddock_teams),
              sum(not any(next((e["starts"] for e in rosters[s]
                                if e["team"] == team), 0)
-                         for s in RACE_SCENARIOS)
+                         for s in scenarios)
                  for team in paddock_teams))
 
-    roster = rosters[args.scenario]
+    roster = rosters[primary_scenario]
     look = board_look(roster, {e["team"] for b in boards.values() for e in b})
-    circuits = sorted(races_by_scenario[args.scenario])
+    circuits = sorted(races_by_scenario[primary_scenario])
     counts = {}
     for b in BOARDS:
         scored = boards[b.slug]
