@@ -760,7 +760,7 @@ BOARDS = [
 def format_metric(board: Board, value: float | None) -> str:
     """A board's metric as a short, readable string with its unit."""
     if value is None:
-        return "&mdash;"
+        return "&ndash;"
     if board.metric == "n_dist_queries":
         for cut, suffix in ((1e9, "G"), (1e6, "M"), (1e3, "k")):
             if abs(value) >= cut:
@@ -1039,18 +1039,40 @@ def _payload(dataset: str, runs: list[TeamRun], scenario: str, threshold: float,
     }
 
 
+def race_scenario_switcher(current: str, pages: dict[str, str]) -> str:
+    """A direct scenario switch for one dataset's circuit page."""
+    if len(pages) == 1:
+        return f'<span class="chip">{current}</span>'
+    options = "".join(
+        f'<option value="{href}"'
+        + (' selected' if scenario == current else '')
+        + f'>{scenario}</option>'
+        for scenario, href in pages.items()
+    )
+    return (
+        '<label class="scenario-switcher">'
+        '<span class="visually-hidden">Racing scenario</span>'
+        f'<select id="scenario-switcher" aria-label="Racing scenario">{options}</select>'
+        '</label>'
+    )
+
+
 def render_race(dataset: str, runs: list[TeamRun], scenario: str, threshold: float,
                 laps: int, duration: float, countdown: bool = True,
                 dots: list[tuple[float, float]] | None = None,
-                circuits_href: str = "index.html") -> str:
+                circuits_href: str = "index.html",
+                scenario_race_pages: dict[str, str] | None = None) -> str:
     data = _payload(dataset, runs, scenario, threshold, laps, duration, countdown)
     blob = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")
     circ = circuit(dataset)
+    scenario_race_pages = scenario_race_pages or {scenario: ""}
     return (
         RACE_TEMPLATE
         .replace("__TITLE__", f"{dataset} &middot; {scenario}")
         .replace("__DATASET__", dataset)
         .replace("__SCENARIO__", scenario)
+        .replace("<!--__SCENARIO_SWITCHER__-->",
+                 race_scenario_switcher(scenario, scenario_race_pages))
         .replace("<!--__NAV__-->", nav_html("", circuits_href))
         .replace("__TRACK_D__", circ.d)
         .replace("__CAR_SVG__", CAR_SVG)
@@ -1241,7 +1263,7 @@ def render_standings(board: Board, scored: list[dict], look: dict[str, dict],
             continue
         who = []
         for e in entries:
-            tag = look.get(e["team"], {}).get("tag", "&mdash;")
+            tag = look.get(e["team"], {}).get("tag", "&ndash;")
             who.append(
                 f'<div class="who" style="{style(e["team"])}">'
                 f'<div class="crown">{"&#127942;" if rank == 1 else ""}</div>'
@@ -1261,7 +1283,7 @@ def render_standings(board: Board, scored: list[dict], look: dict[str, dict],
     head = "".join(f'<th class="num" title="{d}">{codes[d]}</th>' for d in datasets)
     rows = []
     for e in scored:
-        tag = look.get(e["team"], {}).get("tag", "&mdash;")
+        tag = look.get(e["team"], {}).get("tag", "&ndash;")
         rank = "" if e.get("baseline") else ranks[e["team"]]
         row_class = ' class="baseline"' if e.get("baseline") else ""
         cells = []
@@ -1283,7 +1305,7 @@ def render_standings(board: Board, scored: list[dict], look: dict[str, dict],
 
     legend = " &middot; ".join(f"<strong>{codes[d]}</strong> {d}" for d in datasets)
     partial = ("" if len(datasets) == total else
-               f'<p class="note">Partial season &mdash; {len(datasets)} of {total} '
+               f'<p class="note">Partial season &ndash; {len(datasets)} of {total} '
                f'circuits rendered.</p>')
     return (
         STANDINGS_TEMPLATE
@@ -1311,7 +1333,7 @@ def cap_note(board: Board) -> str:
     return (f'<p class="note">Eligibility also requires finishing the queries in '
             f'no more than {board.baseline_cap:g}&times; the time the '
             f'<code>{BASELINE_TEAM}</code> reference run took on the same '
-            f'circuit &mdash; a small index nobody can search is not a prize.</p>')
+            f'circuit &ndash; a small index nobody can search is not a prize.</p>')
 
 
 def render_standings_hub(counts: dict[str, int], total: int) -> str:
@@ -1764,7 +1786,7 @@ __PAGE_CSS__
   <div>
     <h1>Championships</h1>
     <p>Five titles over the same seven circuits, each scoring a different
-       virtue. Pick one &mdash; no spoilers on this page.</p>
+       virtue. Pick one &ndash; no spoilers on this page.</p>
   </div>
   <span class="spacer"></span>
   <!--__NAV__-->
@@ -1822,6 +1844,24 @@ header h1 { margin: 0; font-size: 1.75rem; font-weight: 650; letter-spacing: -.0
   font-size: 1rem; text-transform: uppercase; letter-spacing: .06em;
   padding: .25rem .6rem; border-radius: 999px; border: 1px solid var(--border);
   color: var(--text-2); background: var(--surface-2);
+}
+.scenario-switcher { position: relative; display: inline-flex; align-items: center; }
+.scenario-switcher::after {
+  content: ""; position: absolute; right: .65rem; pointer-events: none;
+  border-left: .28rem solid transparent; border-right: .28rem solid transparent;
+  border-top: .38rem solid var(--text-2);
+}
+.scenario-switcher select {
+  appearance: none; font: inherit; font-size: 1rem; text-transform: uppercase;
+  letter-spacing: .06em; padding: .25rem 1.65rem .25rem .6rem;
+  border-radius: 999px; border: 1px solid var(--border);
+  color: var(--text-2); background: var(--surface-2); cursor: pointer;
+}
+.scenario-switcher select:hover { color: var(--text-1); border-color: var(--text-3); }
+.scenario-switcher select:focus-visible { outline: 2px solid var(--text-1); outline-offset: 2px; }
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 .spacer { flex: 1; }
 nav { display: flex; gap: .25rem; }
@@ -2028,7 +2068,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 <header>
   <h1>__DATASET__</h1>
-  <span class="chip">__SCENARIO__</span>
+  <!--__SCENARIO_SWITCHER__-->
   <span class="chip" id="grid-note"></span>
   <span class="spacer"></span>
   <!--__NAV__-->
@@ -2095,6 +2135,13 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 <script>
 const RACE = /*__PAYLOAD__*/null;
+
+const scenarioSwitcher = document.getElementById("scenario-switcher");
+if (scenarioSwitcher) {
+  scenarioSwitcher.addEventListener("change", () => {
+    window.location.href = scenarioSwitcher.value;
+  });
+}
 
 // ---- theme -----------------------------------------------------------------
 const root = document.documentElement;
@@ -2823,6 +2870,14 @@ def main() -> None:
         for scenario in scenarios
     }
     all_datasets = sorted({d for races in races_by_scenario.values() for d in races})
+    race_pages_by_dataset = {
+        dataset: {
+            scenario: (f"{dataset}.html" if scenario == primary_scenario else
+                       f'{dataset}-{scenario.replace("_", "-")}.html')
+            for scenario in scenarios if dataset in races_by_scenario[scenario]
+        }
+        for dataset in all_datasets
+    }
     dots_by_dataset = {
         dataset: umap_points(dataset, Path(args.datasets_dir), Path(args.umap_cache),
                              args.umap_sample, args.umap_seed)
@@ -2834,12 +2889,11 @@ def main() -> None:
         entries, winners = [], {}
         for dataset in sorted(races):
             runs = races[dataset]
-            path = out / (f"{dataset}.html" if scenario == primary_scenario else
-                          f'{dataset}-{scenario.replace("_", "-")}.html')
+            path = out / race_pages_by_dataset[dataset][scenario]
             html = render_race(
                 dataset, runs, scenario, thresholds[scenario], args.laps,
                 args.duration, args.countdown, dots_by_dataset[dataset],
-                scenario_pages[scenario],
+                scenario_pages[scenario], race_pages_by_dataset[dataset],
             )
             path.write_text(html, encoding="utf-8")
 
